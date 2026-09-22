@@ -17,13 +17,15 @@ from newsfeed import (
     encode_embedding,
     exact_deduplicate,
     fetch_embedding_batch,
+    fetch_metadata_description,
     gemini_payload,
     get_embeddings,
+    hostname_is_public,
     is_excluded_article,
     render_feed,
     review_with_gemini,
+    safe_metadata_url,
 )
-
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -100,6 +102,42 @@ class NewsfeedTests(unittest.TestCase):
             canonicalize_url("https://Example.com/news/?utm_source=x&id=2#top"),
             "https://example.com/news?id=2",
         )
+        self.assertEqual(canonicalize_url("javascript:alert(1)"), "")
+
+    @patch("newsfeed.hostname_is_public", return_value=True)
+    def test_metadata_url_requires_https_and_allowlisted_domain(self, _public: Mock) -> None:
+        self.assertTrue(safe_metadata_url("https://www.trouw.nl/a", ("trouw.nl",)))
+        self.assertFalse(safe_metadata_url("http://www.trouw.nl/a", ("trouw.nl",)))
+        self.assertFalse(safe_metadata_url("https://example.com/a", ("trouw.nl",)))
+        self.assertFalse(safe_metadata_url("https://user:pass@www.trouw.nl/a", ("trouw.nl",)))
+
+    @patch("newsfeed.socket.getaddrinfo")
+    def test_private_metadata_target_is_rejected(self, getaddrinfo: Mock) -> None:
+        getaddrinfo.return_value = [
+            (2, 1, 6, "", ("127.0.0.1", 443)),
+        ]
+        self.assertFalse(hostname_is_public("www.trouw.nl"))
+
+    @patch("newsfeed.hostname_is_public", return_value=True)
+    def test_fetches_only_metadata_description(self, _public: Mock) -> None:
+        response = Mock()
+        response.is_redirect = False
+        response.is_permanent_redirect = False
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.encoding = "utf-8"
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [
+            b'<html><head><meta property="og:description" content="Publieke samenvatting">',
+            b'</head><body>Betaalde artikeltekst die niet verder gelezen hoeft te worden</body>',
+        ]
+        session = Mock()
+        session.get.return_value = response
+        description = fetch_metadata_description(
+            session, "https://www.trouw.nl/a", ("trouw.nl",)
+        )
+        self.assertEqual(description, "Publieke samenvatting")
+        self.assertEqual(session.get.call_args.kwargs["allow_redirects"], False)
+        self.assertLessEqual(sum(map(len, response.iter_content.return_value)), 131_072)
 
     def test_exact_deduplication_removes_tracking_variant(self) -> None:
         first = article("a", "Titel", "https://example.com/a?utm_source=x", "Samenvatting")
@@ -158,7 +196,8 @@ class NewsfeedTests(unittest.TestCase):
                 "gemini-embedding-2",
                 768,
                 50,
-                Path(directory) / "embeddings.json",
+                40,
+                cache_path=Path(directory) / "embeddings.json",
             )
         self.assertIsNone(embeddings)
         self.assertEqual(status["state"], "not_configured_jaccard")
@@ -173,11 +212,36 @@ class NewsfeedTests(unittest.TestCase):
                 "gemini-embedding-2",
                 3,
                 50,
-                cache_path,
+                40,
+                cache_path=cache_path,
             )
             self.assertFalse(cache_path.exists())
         self.assertIsNone(embeddings)
         self.assertEqual(status["state"], "failed_jaccard")
+
+    @patch("newsfeed.fetch_embedding_batch")
+    def test_successful_embedding_batch_is_kept_if_next_batch_fails(self, fetch: Mock) -> None:
+        fetch.side_effect = [
+            [np.array([1.0, 0.0, 0.0], dtype=np.float32)],
+            RuntimeError("quota bereikt"),
+        ]
+        items = [
+            article("a", "Titel A", "https://a.example/1", "Lange samenvatting A"),
+            article("b", "Titel B", "https://b.example/2", "Lange samenvatting B"),
+        ]
+        with TemporaryDirectory() as directory:
+            embeddings, status = get_embeddings(
+                items,
+                "secret",
+                "gemini-embedding-2",
+                3,
+                1,
+                2,
+                cache_path=Path(directory) / "embeddings.json",
+            )
+        self.assertEqual(set(embeddings or {}), {"a"})
+        self.assertEqual(status["state"], "failed_partial_jaccard")
+        self.assertEqual(status["available"], 1)
 
     @patch("newsfeed.requests.post")
     def test_embedding_batch_uses_header_and_clustering_prefix(self, post: Mock) -> None:
@@ -217,8 +281,18 @@ class NewsfeedTests(unittest.TestCase):
     @patch("newsfeed.requests.post")
     def test_valid_gemini_decision_removes_only_redundant_item(self, post: Mock) -> None:
         items = [
-            article("a", "Gebeurtenis met alle feiten", "https://a.example/1", "Feiten A en B"),
-            article("b", "Gebeurtenis kort gemeld", "https://b.example/2", "Feit A"),
+            article(
+                "a",
+                "Gebeurtenis met alle feiten",
+                "https://a.example/1",
+                "Deze samenvatting bevat alle relevante feiten A en B voor de beoordeling.",
+            ),
+            article(
+                "b",
+                "Gebeurtenis kort gemeld",
+                "https://b.example/2",
+                "Deze samenvatting bevat alleen feit A en voegt verder niets nieuws toe.",
+            ),
         ]
         response = Mock()
         response.raise_for_status.return_value = None
@@ -253,6 +327,37 @@ class NewsfeedTests(unittest.TestCase):
         response.json.return_value = {
             "candidates": [
                 {"content": {"parts": [{"text": '{"remove":[{"id":"onbekend","duplicate_of":"a","reason":"x"}]}'}]}}
+            ]
+        }
+        post.return_value = response
+        reviewed, status = review_with_gemini(items, [items], "secret", "gemini-test")
+        self.assertEqual(reviewed, items)
+        self.assertEqual(status["state"], "failed_exact_only")
+
+    @patch("newsfeed.requests.post")
+    def test_gemini_cannot_remove_title_only_item(self, post: Mock) -> None:
+        items = [
+            article(
+                "a",
+                "Gebeurtenis uitgebreid gemeld",
+                "https://a.example/1",
+                "Deze samenvatting bevat voldoende feiten voor een inhoudelijke vergelijking.",
+            ),
+            article("b", "Gebeurtenis kort gemeld", "https://b.example/2", "Kort."),
+        ]
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": '{"remove":[{"id":"b","duplicate_of":"a","reason":"redundant"}]}'
+                            }
+                        ]
+                    }
+                }
             ]
         }
         post.return_value = response

@@ -4,7 +4,10 @@
   "embedding_model": "gemini-embedding-2",
   "embedding_dimensions": 768,
   "embedding_similarity_threshold": 0.78,
-  "embedding_batch_size": 50,
+  "embedding_batch_size": 20,
+  "embedding_max_new_per_run": 40,
+  "metadata_minimum_chars": 80,
+  "metadata_max_pages_per_run": 30,
   "filters": {
     "exclude_url_path_segments": [
       "sport",
@@ -47,60 +50,70 @@
     {
       "name": "NU.nl",
       "url": "https://www.nu.nl/rss/Algemeen",
+      "article_domains": ["nu.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "NOS",
       "url": "https://feeds.nos.nl/nosnieuwsalgemeen",
+      "article_domains": ["nos.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "de Volkskrant",
       "url": "https://www.volkskrant.nl/voorpagina/rss.xml",
+      "article_domains": ["volkskrant.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "Trouw",
       "url": "https://www.trouw.nl/voorpagina/rss.xml",
+      "article_domains": ["trouw.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "AD",
       "url": "https://www.ad.nl/home/rss.xml",
+      "article_domains": ["ad.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "Het Parool",
       "url": "https://www.parool.nl/voorpagina/rss.xml",
+      "article_domains": ["parool.nl"],
       "language": "nl",
       "enabled": true
     },
     {
       "name": "The Guardian — Artificial Intelligence",
       "url": "https://www.theguardian.com/technology/artificialintelligenceai/rss",
+      "article_domains": ["theguardian.com"],
       "language": "en",
       "enabled": true
     },
     {
       "name": "Google DeepMind",
       "url": "https://deepmind.google/blog/rss.xml",
+      "article_domains": ["deepmind.google"],
       "language": "en",
       "enabled": true
     },
     {
       "name": "ScienceDaily — Artificial Intelligence",
       "url": "https://www.sciencedaily.com/rss/computers_math/artificial_intelligence.xml",
+      "article_domains": ["sciencedaily.com"],
       "language": "en",
       "enabled": true
     },
     {
       "name": "Scientias.nl",
       "url": "https://scientias.nl/feed/",
+      "article_domains": ["scientias.nl"],
       "language": "nl",
       "enabled": true
     }

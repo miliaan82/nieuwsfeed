@@ -12,20 +12,23 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 ## Werking
 
 1. GitHub Actions start elke 30 minuten.
-2. `newsfeed.py` haalt alleen RSS-feeds op, nooit de achterliggende artikelpagina's.
+2. `newsfeed.py` haalt de RSS-feeds op.
 3. Sportartikelen worden verwijderd op basis van de RSS-categorie, het URL-pad en
    een beperkte titelcontrole. De regels staan in `config/sources.json`.
-4. De aggregator voegt de nieuwe items samen met maximaal 72 uur historie uit de
-   vorige `public/feed.xml`.
+4. De aggregator voegt de nieuwe items samen met maximaal 72 uur historie uit een
+   private GitHub Actions-cache.
 5. Exact gelijke URL's (zonder trackingparameters) en exact gelijke RSS-inhoud
    worden lokaal verwijderd.
-6. Gemini Embedding 2 maakt met alleen RSS-metadata semantische kandidaatclusters.
-   Eerder berekende vectors worden 72 uur lokaal gecachet; bij een API-fout neemt
-   de bestaande lokale tekstvergelijking het automatisch over.
-7. Alleen de titel, RSS-samenvatting en RSS-metadata van die clusters gaan naar
-   Gemini.
-8. De workflow publiceert `public/feed.xml`, `public/index.html` en
-   `public/status.json` via GitHub Pages.
+6. Alleen wanneer een RSS-samenvatting ontbreekt of erg kort is, leest de bot een
+   begrensd deel van de publieke artikelpagina om uitsluitend de OpenGraph- of
+   meta-description op te halen. De artikeltekst wordt niet verwerkt.
+7. Gemini Embedding 2 maakt van de overgebleven RSS-metadata semantische
+   kandidaatclusters. Eerder berekende vectors worden privé gecachet; bij een
+   API-fout neemt de lokale tekstvergelijking het automatisch over.
+8. Alleen de titel, RSS-samenvatting/paginametadata en RSS-metadata van die
+   clusters gaan naar Gemini Flash voor de uiteindelijke behoudsbeslissing.
+9. De workflow publiceert `public/feed.xml`, `public/index.html` en
+   `public/status.json` rechtstreeks via GitHub Pages.
 
 Gemini werkt conservatief: dezelfde gebeurtenis is niet genoeg om iets te
 verwijderen. Nieuwe feiten, primaire bronnen, expertise, gevolgen, onzekerheid,
@@ -52,6 +55,10 @@ niet; nog geldige items uit de vorige feed blijven maximaal 72 uur beschikbaar.
 
 Het standaardmodel is `gemini-3.8-flash`. Een ander model kan zonder codewijziging
 worden ingesteld als Actions-variable `GEMINI_MODEL`.
+
+De feed wordt om minuut 7 en 37 van ieder uur opnieuw gebouwd. Feedly bepaalt zelf
+wanneer het de feed opnieuw ophaalt; daardoor kan een nieuw artikel daar later
+verschijnen dan op de statuspagina. De RSS-feed bevat een TTL-hint van 30 minuten.
 
 ## Lokale uitvoering
 
@@ -85,7 +92,10 @@ Ondersteunde environment variables:
 | `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` | Model voor kandidaatclustering |
 | `EMBEDDING_DIMENSIONS` | `768` | Aantal dimensies per embedding |
 | `EMBEDDING_SIMILARITY_THRESHOLD` | `0.78` | Cosine-grens voor kandidaatclusters |
-| `EMBEDDING_BATCH_SIZE` | `50` | Artikelen per embedding-request |
+| `EMBEDDING_BATCH_SIZE` | `20` | Artikelen per embedding-request |
+| `EMBEDDING_MAX_NEW_PER_RUN` | `40` | Maximum nieuwe embeddings per run |
+| `METADATA_MINIMUM_CHARS` | `80` | RSS-samenvattingen hieronder mogen worden verrijkt |
+| `METADATA_MAX_PAGES_PER_RUN` | `30` | Maximum artikelpagina's voor metadata per run |
 | `HISTORY_HOURS` | `72` | Maximale ouderdom van artikelen |
 | `CLUSTER_WINDOW_HOURS` | `36` | Tijdvenster voor kandidaatvergelijking |
 | `PUBLIC_BASE_URL` | GitHub Pages-URL | Basis-URL in de RSS-feed |
@@ -96,8 +106,24 @@ Ondersteunde environment variables:
 - `public/feed.xml`: de Feedly-feed.
 - `public/index.html`: leesbare statuspagina.
 - `public/status.json`: machineleesbare bron- en runstatus.
-- `data/embeddings.json`: gekwantiseerde cache met alleen numerieke vectors;
-  deze map wordt niet via GitHub Pages gepubliceerd.
+- `.cache/newsfeed`: private, kortlevende Actions-cache voor historie,
+  paginametadata en gekwantiseerde embeddings; deze map wordt niet gepubliceerd
+  of gecommit.
 
 De software haalt geen volledige (betaalde) artikelen op en stuurt die dus ook
-niet naar Gemini. Foutmeldingen en statusbestanden bevatten geen API-sleutel.
+niet naar Gemini. Metadata-ophaling accepteert alleen HTTPS, vooraf toegestane
+brondomeinen en publieke IP-adressen, volgt maximaal drie gecontroleerde redirects
+en leest maximaal 128 KiB. De workflow heeft alleen leesrecht op de repository;
+publicatie verloopt via het afzonderlijke Pages-permission. Externe Actions zijn
+op volledige commit-SHA's vastgezet, Python-afhankelijkheden staan met hashes in
+`requirements.lock`, en CodeQL en Dependabot controleren nieuwe wijzigingen.
+
+Het repositorysecret wordt alleen als HTTP-header aan Google aangeboden. De
+publieke feed en status bevatten geen API-sleutel, persoonlijke leesgeschiedenis
+of klikgedrag. Ze bevatten wel bewust openbare nieuwsmetadata en de GitHub-
+gebruikersnaam die al in de openbare Pages-URL staat.
+
+Bij een nieuw gratis project kan de embeddingcache zich over meerdere runs vullen
+door `EMBEDDING_MAX_NEW_PER_RUN`. Een HTTP 429 betekent dat het gratis quotum of
+de tijdelijke snelheidslimiet is bereikt; de run blijft dan veilig werken met de
+reeds beschikbare embeddings en lokale tekstvergelijking.

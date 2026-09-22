@@ -1,3 +1,4 @@
+defusedxml==0.7.1
 feedparser==6.0.14
 numpy==2.5.3
 requests==2.34.2
