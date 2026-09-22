@@ -1,28 +1,30 @@
 {
-  "generated_at": "2026-09-22T20:41:31.372746+00:00",
+  "generated_at": "2026-09-22T20:42:55.584824+00:00",
   "history_hours": 72,
   "cluster_window_hours": 36,
   "articles_fetched": 255,
-  "articles_from_previous_feed": 271,
+  "articles_from_previous_feed": 273,
   "articles_excluded_by_filter": 27,
   "previous_articles_excluded_by_filter": 0,
-  "articles_after_exact_deduplication": 273,
-  "articles_published": 273,
-  "exact_duplicates_removed": 253,
+  "articles_after_exact_deduplication": 276,
+  "articles_published": 276,
+  "exact_duplicates_removed": 252,
   "embeddings": {
     "model": "gemini-embedding-2",
     "dimensions": 768,
-    "articles": 273,
+    "articles": 276,
     "cached": 0,
-    "requested": 0,
-    "state": "not_configured_jaccard",
+    "requested": 276,
+    "state": "failed_jaccard",
+    "error": "HTTPError: 429 Client Error: Too Many Requests for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents",
     "similarity_threshold": 0.78
   },
   "gemini": {
-    "state": "not_configured_exact_only",
+    "state": "failed_exact_only",
     "model": "gemini-3.8-flash",
     "removed": 0,
-    "candidate_clusters": 21
+    "candidate_clusters": 23,
+    "error": "HTTPError: 503 Server Error: Service Unavailable for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
   },
   "sources_ok": 10,
   "sources_failed": 0,
@@ -34,7 +36,7 @@
       "fetched_items": 30,
       "accepted_items": 24,
       "excluded_items": 6,
-      "duration_ms": 322,
+      "duration_ms": 272,
       "error": null
     },
     {
@@ -44,7 +46,7 @@
       "fetched_items": 20,
       "accepted_items": 20,
       "excluded_items": 0,
-      "duration_ms": 985,
+      "duration_ms": 942,
       "error": null
     },
     {
@@ -54,7 +56,7 @@
       "fetched_items": 77,
       "accepted_items": 58,
       "excluded_items": 3,
-      "duration_ms": 364,
+      "duration_ms": 375,
       "error": null
     },
     {
@@ -64,7 +66,7 @@
       "fetched_items": 93,
       "accepted_items": 61,
       "excluded_items": 5,
-      "duration_ms": 377,
+      "duration_ms": 448,
       "error": null
     },
     {
@@ -74,7 +76,7 @@
       "fetched_items": 30,
       "accepted_items": 20,
       "excluded_items": 10,
-      "duration_ms": 142,
+      "duration_ms": 471,
       "error": null
     },
     {
@@ -84,7 +86,7 @@
       "fetched_items": 100,
       "accepted_items": 43,
       "excluded_items": 3,
-      "duration_ms": 668,
+      "duration_ms": 445,
       "error": null
     },
     {
@@ -94,7 +96,7 @@
       "fetched_items": 20,
       "accepted_items": 20,
       "excluded_items": 0,
-      "duration_ms": 280,
+      "duration_ms": 305,
       "error": null
     },
     {
@@ -104,7 +106,7 @@
       "fetched_items": 100,
       "accepted_items": 0,
       "excluded_items": 0,
-      "duration_ms": 469,
+      "duration_ms": 472,
       "error": null
     },
     {
@@ -114,7 +116,7 @@
       "fetched_items": 60,
       "accepted_items": 1,
       "excluded_items": 0,
-      "duration_ms": 256,
+      "duration_ms": 138,
       "error": null
     },
     {
@@ -124,7 +126,7 @@
       "fetched_items": 8,
       "accepted_items": 8,
       "excluded_items": 0,
-      "duration_ms": 656,
+      "duration_ms": 638,
       "error": null
     }
   ]
