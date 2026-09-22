@@ -13,14 +13,16 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 
 1. GitHub Actions start elke 30 minuten.
 2. `newsfeed.py` haalt alleen RSS-feeds op, nooit de achterliggende artikelpagina's.
-3. De aggregator voegt de nieuwe items samen met maximaal 72 uur historie uit de
+3. Sportartikelen worden verwijderd op basis van de RSS-categorie, het URL-pad en
+   een beperkte titelcontrole. De regels staan in `config/sources.json`.
+4. De aggregator voegt de nieuwe items samen met maximaal 72 uur historie uit de
    vorige `public/feed.xml`.
-4. Exact gelijke URL's (zonder trackingparameters) en exact gelijke RSS-inhoud
+5. Exact gelijke URL's (zonder trackingparameters) en exact gelijke RSS-inhoud
    worden lokaal verwijderd.
-5. Een goedkope tekstvergelijking maakt clusters van mogelijke dubbelen.
-6. Alleen de titel, RSS-samenvatting en RSS-metadata van die clusters gaan naar
+6. Een goedkope tekstvergelijking maakt clusters van mogelijke dubbelen.
+7. Alleen de titel, RSS-samenvatting en RSS-metadata van die clusters gaan naar
    Gemini.
-7. De workflow publiceert `public/feed.xml`, `public/index.html` en
+8. De workflow publiceert `public/feed.xml`, `public/index.html` en
    `public/status.json` via GitHub Pages.
 
 Gemini werkt conservatief: dezelfde gebeurtenis is niet genoeg om iets te

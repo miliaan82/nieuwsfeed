@@ -1,3 +1,4 @@
+import re
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -5,9 +6,11 @@ from unittest.mock import Mock, patch
 
 from newsfeed import (
     Article,
+    ExclusionRules,
     candidate_clusters,
     canonicalize_url,
     exact_deduplicate,
+    is_excluded_article,
     render_feed,
     review_with_gemini,
 )
@@ -30,6 +33,51 @@ def article(article_id: str, title: str, link: str, summary: str, source: str = 
 
 
 class NewsfeedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sport_rules = ExclusionRules(
+            url_path_segments=frozenset({"sport", "voetbal"}),
+            category_terms=frozenset({"sport", "voetbal"}),
+            title_patterns=(re.compile(r"\b(sport\w*|voetbal\w*)\b", re.IGNORECASE),),
+        )
+
+    def test_sport_url_is_excluded(self) -> None:
+        self.assertTrue(
+            is_excluded_article(
+                "Club presenteert nieuwe trainer",
+                "https://example.com/voetbal/nieuws",
+                (),
+                self.sport_rules,
+            )
+        )
+
+    def test_sport_category_is_excluded(self) -> None:
+        self.assertTrue(
+            is_excluded_article(
+                "Nieuwe trainer gepresenteerd",
+                "https://example.com/nieuws/1",
+                ("Voetbal",),
+                self.sport_rules,
+            )
+        )
+
+    def test_sport_title_is_excluded_but_transport_is_not(self) -> None:
+        self.assertTrue(
+            is_excluded_article(
+                "Voetbalteam wint finale",
+                "https://example.com/nieuws/1",
+                (),
+                self.sport_rules,
+            )
+        )
+        self.assertFalse(
+            is_excluded_article(
+                "Kabinet investeert in openbaar transport",
+                "https://example.com/economie/2",
+                (),
+                self.sport_rules,
+            )
+        )
+
     def test_canonical_url_drops_tracking(self) -> None:
         self.assertEqual(
             canonicalize_url("https://Example.com/news/?utm_source=x&id=2#top"),

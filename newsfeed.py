@@ -25,7 +25,7 @@ from email.utils import format_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import feedparser
 import requests
@@ -112,8 +112,16 @@ class SourceStatus:
     ok: bool
     fetched_items: int
     accepted_items: int
+    excluded_items: int
     duration_ms: int
     error: str | None = None
+
+
+@dataclass(slots=True)
+class ExclusionRules:
+    url_path_segments: frozenset[str]
+    category_terms: frozenset[str]
+    title_patterns: tuple[re.Pattern[str], ...]
 
 
 def utc_now() -> datetime:
@@ -181,6 +189,55 @@ def content_tokens(value: str) -> set[str]:
     }
 
 
+def exclusion_rules(config: dict[str, Any]) -> ExclusionRules:
+    filters = config.get("filters") or {}
+    return ExclusionRules(
+        url_path_segments=frozenset(
+            str(value).casefold().strip("/")
+            for value in filters.get("exclude_url_path_segments", [])
+            if str(value).strip("/")
+        ),
+        category_terms=frozenset(
+            normalized_text(str(value))
+            for value in filters.get("exclude_category_terms", [])
+            if normalized_text(str(value))
+        ),
+        title_patterns=tuple(
+            re.compile(str(pattern), re.IGNORECASE)
+            for pattern in filters.get("exclude_title_patterns", [])
+        ),
+    )
+
+
+def is_excluded_article(
+    title: str,
+    link: str,
+    categories: Iterable[str],
+    rules: ExclusionRules,
+) -> bool:
+    try:
+        path_segments = {
+            segment.casefold()
+            for segment in unquote(urlsplit(link).path).split("/")
+            if segment
+        }
+    except ValueError:
+        path_segments = set()
+    if path_segments & rules.url_path_segments:
+        return True
+
+    normalized_categories = {normalized_text(category) for category in categories}
+    if any(
+        term == category or f" {term} " in f" {category} "
+        for category in normalized_categories
+        for term in rules.category_terms
+    ):
+        return True
+
+    normalized_title = normalized_text(title)
+    return any(pattern.search(normalized_title) for pattern in rules.title_patterns)
+
+
 def stable_article_id(link: str, source: str, guid: str, title: str) -> str:
     seed = canonicalize_url(link) or f"{source}|{guid}|{normalized_text(title)}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
@@ -222,6 +279,7 @@ def fetch_source(
     source: dict[str, Any],
     now: datetime,
     cutoff: datetime,
+    rules: ExclusionRules,
 ) -> tuple[list[Article], SourceStatus]:
     started = time.monotonic()
     name = str(source["name"])
@@ -237,10 +295,19 @@ def fetch_source(
             raise ValueError(f"ongeldige feed: {parsed.bozo_exception}")
 
         articles: list[Article] = []
+        excluded_items = 0
         for entry in parsed.entries:
             title = clean_text(entry.get("title"), 500)
             link = canonicalize_url(str(entry.get("link", "")))
             summary = clean_text(entry.get("summary") or entry.get("description"))
+            categories = [
+                clean_text(tag.get("term"))
+                for tag in entry.get("tags", [])
+                if isinstance(tag, dict) and tag.get("term")
+            ]
+            if title and link and is_excluded_article(title, link, categories, rules):
+                excluded_items += 1
+                continue
             published = parsed_datetime(entry, now)
             if published > now + timedelta(hours=2):
                 published = now
@@ -265,6 +332,7 @@ def fetch_source(
             ok=True,
             fetched_items=len(parsed.entries),
             accepted_items=len(articles),
+            excluded_items=excluded_items,
             duration_ms=round((time.monotonic() - started) * 1000),
         )
         return articles, status
@@ -276,6 +344,7 @@ def fetch_source(
             ok=False,
             fetched_items=0,
             accepted_items=0,
+            excluded_items=0,
             duration_ms=round((time.monotonic() - started) * 1000),
             error=f"{type(exc).__name__}: {str(exc)[:240]}",
         )
@@ -291,14 +360,23 @@ def parse_iso_datetime(value: str | None, fallback: datetime) -> datetime:
         return fallback
 
 
-def load_previous_articles(path: Path, cutoff: datetime, now: datetime) -> list[Article]:
+def load_previous_articles(
+    path: Path,
+    cutoff: datetime,
+    now: datetime,
+    rules: ExclusionRules,
+) -> tuple[list[Article], int]:
     if not path.exists():
-        return []
+        return [], 0
     parsed = feedparser.parse(path.read_bytes())
     articles: list[Article] = []
+    excluded_items = 0
     for entry in parsed.entries:
         title = clean_text(entry.get("title"), 500)
         link = canonicalize_url(str(entry.get("link", "")))
+        if title and link and is_excluded_article(title, link, (), rules):
+            excluded_items += 1
+            continue
         published = parsed_datetime(entry, now)
         if published < cutoff or not title or not link:
             continue
@@ -321,7 +399,7 @@ def load_previous_articles(path: Path, cutoff: datetime, now: datetime) -> list[
                 fetched_at=parse_iso_datetime(entry.get("nf_fetchedat"), published),
             )
         )
-    return articles
+    return articles, excluded_items
 
 
 def exact_deduplicate(articles: Iterable[Article]) -> tuple[list[Article], int]:
@@ -585,7 +663,8 @@ def render_status_page(status: dict[str, Any]) -> str:
     for source in sources:
         state = "OK" if source["ok"] else "Fout"
         detail = (
-            f'{source["accepted_items"]} actueel van {source["fetched_items"]} items'
+            f'{source["accepted_items"]} actueel, {source["excluded_items"]} uitgesloten '
+            f'van {source["fetched_items"]} items'
             if source["ok"]
             else html.escape(source.get("error") or "Onbekende fout")
         )
@@ -633,6 +712,7 @@ def render_status_page(status: dict[str, Any]) -> str:
   <p><a href="feed.xml">Open RSS-feed</a> · <a href="status.json">Bekijk ruwe status</a></p>
   <section class="cards">
     <div class="card"><span class="number">{status["articles_published"]}</span>artikelen in 72 uur</div>
+    <div class="card"><span class="number">{status["articles_excluded_by_filter"]}</span>sportartikelen uitgesloten</div>
     <div class="card"><span class="number">{status["exact_duplicates_removed"]}</span>exacte dubbelen verwijderd</div>
     <div class="card{warning}"><strong>{html.escape(display_ai_state(ai_state))}</strong><br>
       <span class="muted">{status["gemini"]["removed"]} semantische dubbelen verwijderd</span></div>
@@ -655,15 +735,18 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
     public_base_url = os.getenv(
         "PUBLIC_BASE_URL", "https://miliaan82.github.io/nieuwsfeed"
     ).rstrip("/")
+    rules = exclusion_rules(config)
 
-    previous = load_previous_articles(public_dir / "feed.xml", cutoff, now)
+    previous, previous_excluded = load_previous_articles(
+        public_dir / "feed.xml", cutoff, now, rules
+    )
     session = create_session()
     fetched: list[Article] = []
     source_statuses: list[SourceStatus] = []
     for source in config["sources"]:
         if not source.get("enabled", True):
             continue
-        articles, source_status = fetch_source(session, source, now, cutoff)
+        articles, source_status = fetch_source(session, source, now, cutoff, rules)
         fetched.extend(articles)
         source_statuses.append(source_status)
 
@@ -680,6 +763,10 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
         "cluster_window_hours": cluster_window_hours,
         "articles_fetched": len(fetched),
         "articles_from_previous_feed": len(previous),
+        "articles_excluded_by_filter": sum(
+            source.excluded_items for source in source_statuses
+        ),
+        "previous_articles_excluded_by_filter": previous_excluded,
         "articles_after_exact_deduplication": len(exact_unique),
         "articles_published": len(final_articles),
         "exact_duplicates_removed": exact_removed,

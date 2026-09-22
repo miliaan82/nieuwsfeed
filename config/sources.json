@@ -1,6 +1,44 @@
 {
   "history_hours": 72,
   "cluster_window_hours": 36,
+  "filters": {
+    "exclude_url_path_segments": [
+      "sport",
+      "sportnieuws",
+      "voetbal",
+      "wielrennen",
+      "tennis",
+      "schaatsen",
+      "formule-1",
+      "f1",
+      "autosport",
+      "motorsport",
+      "hockey",
+      "basketbal",
+      "handbal",
+      "volleybal",
+      "darts",
+      "atletiek",
+      "olympische-spelen",
+      "esports",
+      "e-sports"
+    ],
+    "exclude_category_terms": [
+      "sport",
+      "voetbal",
+      "wielrennen",
+      "tennis",
+      "schaatsen",
+      "hockey",
+      "basketbal",
+      "motorsport",
+      "autosport"
+    ],
+    "exclude_title_patterns": [
+      "\\b(sport\\w*|voetbal\\w*|wielren\\w*|tennis\\w*|schaats\\w*|hockey\\w*|basketbal\\w*|handbal\\w*|volleybal\\w*|darts|atletiek|formule 1|grand prix|eredivisie|champions league|davis cup|bondscoach)\\b",
+      "\\b(sports?\\w*|football\\w*|soccer|cycling|cyclist\\w*|tennis\\w*|ice hockey|basketball\\w*|formula 1|grand prix|olympic\\w*|premier league|champions league|world cup)\\b"
+    ]
+  },
   "sources": [
     {
       "name": "NU.nl",
