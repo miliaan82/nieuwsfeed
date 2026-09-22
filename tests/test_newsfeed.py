@@ -319,8 +319,18 @@ class NewsfeedTests(unittest.TestCase):
     @patch("newsfeed.requests.post")
     def test_invalid_gemini_decision_keeps_every_candidate(self, post: Mock) -> None:
         items = [
-            article("a", "Gebeurtenis met feiten", "https://a.example/1", "Feiten A"),
-            article("b", "Gebeurtenis gemeld", "https://b.example/2", "Feit A"),
+            article(
+                "a",
+                "Gebeurtenis met feiten",
+                "https://a.example/1",
+                "Deze samenvatting bevat genoeg feiten voor een geldige vergelijking.",
+            ),
+            article(
+                "b",
+                "Gebeurtenis gemeld",
+                "https://b.example/2",
+                "Deze samenvatting is ook lang genoeg voor een geldige vergelijking.",
+            ),
         ]
         response = Mock()
         response.raise_for_status.return_value = None
@@ -363,7 +373,46 @@ class NewsfeedTests(unittest.TestCase):
         post.return_value = response
         reviewed, status = review_with_gemini(items, [items], "secret", "gemini-test")
         self.assertEqual(reviewed, items)
-        self.assertEqual(status["state"], "failed_exact_only")
+        self.assertEqual(status["state"], "no_reviewable_candidates")
+        post.assert_not_called()
+
+    @patch("newsfeed.requests.post")
+    def test_short_item_is_kept_while_reviewable_pair_is_processed(self, post: Mock) -> None:
+        items = [
+            article(
+                "a",
+                "Gebeurtenis met alle feiten",
+                "https://a.example/1",
+                "Deze samenvatting bevat alle relevante feiten voor de vergelijking.",
+            ),
+            article(
+                "b",
+                "Gebeurtenis redundant gemeld",
+                "https://b.example/2",
+                "Deze samenvatting herhaalt dezelfde relevante feiten zonder toevoeging.",
+            ),
+            article("c", "Gebeurtenis zonder uitleg", "https://c.example/3", "Kort."),
+        ]
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": '{"remove":[{"id":"b","duplicate_of":"a","reason":"redundant"}]}'
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        post.return_value = response
+        reviewed, status = review_with_gemini(items, [items], "secret", "gemini-test")
+        self.assertEqual([item.article_id for item in reviewed], ["a", "c"])
+        self.assertEqual(status["state"], "ok")
+        self.assertEqual(status["articles_skipped_insufficient_summary"], 1)
 
     def test_rendered_feed_is_valid_xml(self) -> None:
         item = article("a", "Titel & nuance", "https://example.com/a", "Samenvatting <veilig>")

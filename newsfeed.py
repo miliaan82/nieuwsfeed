@@ -1012,9 +1012,30 @@ def review_with_gemini(
             "candidate_clusters": len(clusters),
         }
 
+    reviewable_clusters: list[list[Article]] = []
+    skipped_articles = 0
+    for cluster in clusters:
+        reviewable = [
+            article
+            for article in cluster
+            if len(article.summary.strip()) >= MIN_AI_SUMMARY_CHARS
+        ]
+        skipped_articles += len(cluster) - len(reviewable)
+        if len(reviewable) >= 2:
+            reviewable_clusters.append(reviewable)
+    if not reviewable_clusters:
+        return articles, {
+            "state": "no_reviewable_candidates",
+            "model": model,
+            "removed": 0,
+            "candidate_clusters": 0,
+            "candidate_clusters_detected": len(clusters),
+            "articles_skipped_insufficient_summary": skipped_articles,
+        }
+
     cluster_by_id: dict[str, set[str]] = {}
     article_by_id = {article.article_id: article for article in articles}
-    for cluster in clusters:
+    for cluster in reviewable_clusters:
         ids = {article.article_id for article in cluster}
         for article_id in ids:
             cluster_by_id[article_id] = ids
@@ -1023,7 +1044,7 @@ def review_with_gemini(
         endpoint = GEMINI_ENDPOINT.format(model=model)
         response = post_json_with_retry(
             endpoint,
-            gemini_payload(clusters),
+            gemini_payload(reviewable_clusters),
             {
                 "User-Agent": USER_AGENT,
                 "Content-Type": "application/json",
@@ -1056,7 +1077,7 @@ def review_with_gemini(
                 raise ValueError("Gemini wilde verwijderen zonder voldoende samenvattingsinformatie")
             remove_ids.add(article_id)
 
-        for cluster in clusters:
+        for cluster in reviewable_clusters:
             ids = {article.article_id for article in cluster}
             if ids and ids <= remove_ids:
                 raise ValueError("Gemini wilde een volledig cluster verwijderen")
@@ -1066,7 +1087,9 @@ def review_with_gemini(
             "state": "ok",
             "model": model,
             "removed": len(remove_ids),
-            "candidate_clusters": len(clusters),
+            "candidate_clusters": len(reviewable_clusters),
+            "candidate_clusters_detected": len(clusters),
+            "articles_skipped_insufficient_summary": skipped_articles,
         }
     except Exception as exc:
         logging.error("Gemini-beoordeling mislukt; fail-safe exact-only actief: %s", exc)
@@ -1074,7 +1097,9 @@ def review_with_gemini(
             "state": "failed_exact_only",
             "model": model,
             "removed": 0,
-            "candidate_clusters": len(clusters),
+            "candidate_clusters": len(reviewable_clusters),
+            "candidate_clusters_detected": len(clusters),
+            "articles_skipped_insufficient_summary": skipped_articles,
             "error": public_error(exc),
         }
 
@@ -1125,6 +1150,7 @@ def display_ai_state(state: str) -> str:
     labels = {
         "ok": "Gemini-beoordeling geslaagd",
         "no_candidates": "Geen kandidaatclusters",
+        "no_reviewable_candidates": "Geen clusters met voldoende samenvatting",
         "not_configured_exact_only": "Alleen exacte deduplicatie (API-sleutel ontbreekt)",
         "failed_exact_only": "Alleen exacte deduplicatie (Gemini faalde)",
     }
