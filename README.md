@@ -19,7 +19,9 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
    vorige `public/feed.xml`.
 5. Exact gelijke URL's (zonder trackingparameters) en exact gelijke RSS-inhoud
    worden lokaal verwijderd.
-6. Een goedkope tekstvergelijking maakt clusters van mogelijke dubbelen.
+6. Gemini Embedding 2 maakt met alleen RSS-metadata semantische kandidaatclusters.
+   Eerder berekende vectors worden 72 uur lokaal gecachet; bij een API-fout neemt
+   de bestaande lokale tekstvergelijking het automatisch over.
 7. Alleen de titel, RSS-samenvatting en RSS-metadata van die clusters gaan naar
    Gemini.
 8. De workflow publiceert `public/feed.xml`, `public/index.html` en
@@ -32,18 +34,21 @@ toon of framing zonder extra informatie is geen zelfstandig behoudsargument.
 
 ### Fail-safe
 
-Als de API-sleutel ontbreekt, Gemini niet bereikbaar is of de respons ongeldig is,
+Als de API-sleutel ontbreekt, Gemini niet bereikbaar is, het gratis quotum op is
+of de respons ongeldig is,
 wordt geen enkel mogelijk inhoudelijk duplicaat verwijderd. Alleen de voorafgaande
 exacte deduplicatie blijft dan actief. Een bronstoring blokkeert de overige bronnen
 niet; nog geldige items uit de vorige feed blijven maximaal 72 uur beschikbaar.
 
 ## Eenmalige configuratie op GitHub
 
-1. Open **Settings → Secrets and variables → Actions → New repository secret**.
-2. Maak het secret `GEMINI_API_KEY` met de sleutel uit Google AI Studio.
-3. Open **Settings → Pages** en kies bij **Source** voor **GitHub Actions**.
-4. Open **Actions → Update news feed → Run workflow** voor de eerste handmatige run.
-5. Voeg daarna de bovenstaande `feed.xml`-URL toe in Feedly.
+1. Maak in Google AI Studio een apart Google-project zonder gekoppelde
+   betaalmethode. Activeer geen betaalde tier.
+2. Open **Settings → Secrets and variables → Actions → New repository secret**.
+3. Maak het secret `GEMINI_API_KEY` met de sleutel uit dat gratis project.
+4. Open **Settings → Pages** en kies bij **Source** voor **GitHub Actions**.
+5. Open **Actions → Update news feed → Run workflow** voor de eerste handmatige run.
+6. Voeg daarna de bovenstaande `feed.xml`-URL toe in Feedly.
 
 Het standaardmodel is `gemini-3.8-flash`. Een ander model kan zonder codewijziging
 worden ingesteld als Actions-variable `GEMINI_MODEL`.
@@ -58,7 +63,8 @@ python newsfeed.py
 python -m unittest discover -s tests -v
 ```
 
-Zonder `GEMINI_API_KEY` draait de lokale versie bewust in exact-only-modus. Voor
+Zonder `GEMINI_API_KEY` draait de lokale versie bewust met Jaccard-voorselectie en
+exact-only-verwijdering. Voor
 een volledige lokale run:
 
 ```bash
@@ -76,6 +82,10 @@ Ondersteunde environment variables:
 |---|---:|---|
 | `GEMINI_API_KEY` | leeg | Activeert semantische beoordeling |
 | `GEMINI_MODEL` | `gemini-3.8-flash` | Gemini-model-ID |
+| `GEMINI_EMBEDDING_MODEL` | `gemini-embedding-2` | Model voor kandidaatclustering |
+| `EMBEDDING_DIMENSIONS` | `768` | Aantal dimensies per embedding |
+| `EMBEDDING_SIMILARITY_THRESHOLD` | `0.78` | Cosine-grens voor kandidaatclusters |
+| `EMBEDDING_BATCH_SIZE` | `50` | Artikelen per embedding-request |
 | `HISTORY_HOURS` | `72` | Maximale ouderdom van artikelen |
 | `CLUSTER_WINDOW_HOURS` | `36` | Tijdvenster voor kandidaatvergelijking |
 | `PUBLIC_BASE_URL` | GitHub Pages-URL | Basis-URL in de RSS-feed |
@@ -86,6 +96,8 @@ Ondersteunde environment variables:
 - `public/feed.xml`: de Feedly-feed.
 - `public/index.html`: leesbare statuspagina.
 - `public/status.json`: machineleesbare bron- en runstatus.
+- `data/embeddings.json`: gekwantiseerde cache met alleen numerieke vectors;
+  deze map wordt niet via GitHub Pages gepubliceerd.
 
 De software haalt geen volledige (betaalde) artikelen op en stuurt die dus ook
 niet naar Gemini. Foutmeldingen en statusbestanden bevatten geen API-sleutel.

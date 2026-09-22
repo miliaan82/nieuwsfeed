@@ -1,6 +1,10 @@
 {
   "history_hours": 72,
   "cluster_window_hours": 36,
+  "embedding_model": "gemini-embedding-2",
+  "embedding_dimensions": 768,
+  "embedding_similarity_threshold": 0.78,
+  "embedding_batch_size": 50,
   "filters": {
     "exclude_url_path_segments": [
       "sport",
@@ -35,7 +39,7 @@
       "autosport"
     ],
     "exclude_title_patterns": [
-      "\\b(sport\\w*|voetbal\\w*|wielren\\w*|tennis\\w*|schaats\\w*|hockey\\w*|basketbal\\w*|handbal\\w*|volleybal\\w*|darts|atletiek|formule 1|grand prix|eredivisie|champions league|davis cup|bondscoach)\\b",
+      "\\b(sport\\w*|hengelsport\\w*|voetbal\\w*|wielren\\w*|tennis\\w*|schaats\\w*|hockey\\w*|basketbal\\w*|handbal\\w*|volleybal\\w*|darts|atletiek|formule 1|grand prix|eredivisie|champions league|davis cup|bondscoach)\\b",
       "\\b(sports?\\w*|football\\w*|soccer|cycling|cyclist\\w*|tennis\\w*|ice hockey|basketball\\w*|formula 1|grand prix|olympic\\w*|premier league|champions league|world cup)\\b"
     ]
   },

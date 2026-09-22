@@ -2,14 +2,23 @@ import re
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
+
+import numpy as np
 
 from newsfeed import (
     Article,
     ExclusionRules,
     candidate_clusters,
     canonicalize_url,
+    decode_embedding,
+    encode_embedding,
     exact_deduplicate,
+    fetch_embedding_batch,
+    gemini_payload,
+    get_embeddings,
     is_excluded_article,
     render_feed,
     review_with_gemini,
@@ -37,7 +46,7 @@ class NewsfeedTests(unittest.TestCase):
         self.sport_rules = ExclusionRules(
             url_path_segments=frozenset({"sport", "voetbal"}),
             category_terms=frozenset({"sport", "voetbal"}),
-            title_patterns=(re.compile(r"\b(sport\w*|voetbal\w*)\b", re.IGNORECASE),),
+            title_patterns=(re.compile(r"\b(sport\w*|hengelsport\w*|voetbal\w*)\b", re.IGNORECASE),),
         )
 
     def test_sport_url_is_excluded(self) -> None:
@@ -77,6 +86,14 @@ class NewsfeedTests(unittest.TestCase):
                 self.sport_rules,
             )
         )
+        self.assertTrue(
+            is_excluded_article(
+                "Hengelsport haalt opgelucht adem",
+                "https://example.com/binnenland/3",
+                (),
+                self.sport_rules,
+            )
+        )
 
     def test_canonical_url_drops_tracking(self) -> None:
         self.assertEqual(
@@ -112,6 +129,81 @@ class NewsfeedTests(unittest.TestCase):
         clusters = candidate_clusters(items, 36)
         self.assertEqual(len(clusters), 1)
         self.assertEqual({item.article_id for item in clusters[0]}, {"a", "b"})
+
+    def test_embeddings_can_find_event_without_word_overlap(self) -> None:
+        items = [
+            article("a", "AI-platform getroffen door aanvallers", "https://a.example/1", "Beveiligingsincident"),
+            article("b", "Waarom de Hugging Face-hack meevalt", "https://b.example/2", "Technische analyse"),
+            article("c", "Kabinet presenteert begroting", "https://c.example/3", "Nieuwe plannen"),
+        ]
+        embeddings = {
+            "a": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+            "b": np.array([0.99, 0.05, 0.0], dtype=np.float32),
+            "c": np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        }
+        clusters = candidate_clusters(items, 36, embeddings, 0.95)
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual({item.article_id for item in clusters[0]}, {"a", "b"})
+
+    def test_embedding_cache_roundtrip_is_close(self) -> None:
+        vector = np.array([-0.4, 0.0, 0.25, 0.8], dtype=np.float32)
+        decoded = decode_embedding(encode_embedding(vector), 4)
+        np.testing.assert_allclose(decoded, vector, atol=0.007)
+
+    def test_without_api_key_embeddings_fall_back_to_jaccard(self) -> None:
+        with TemporaryDirectory() as directory:
+            embeddings, status = get_embeddings(
+                [article("a", "Titel", "https://a.example/1", "Samenvatting")],
+                None,
+                "gemini-embedding-2",
+                768,
+                50,
+                Path(directory) / "embeddings.json",
+            )
+        self.assertIsNone(embeddings)
+        self.assertEqual(status["state"], "not_configured_jaccard")
+
+    @patch("newsfeed.fetch_embedding_batch", side_effect=RuntimeError("quota bereikt"))
+    def test_embedding_failure_does_not_leave_partial_cache(self, _fetch: Mock) -> None:
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "embeddings.json"
+            embeddings, status = get_embeddings(
+                [article("a", "Titel", "https://a.example/1", "Samenvatting")],
+                "secret",
+                "gemini-embedding-2",
+                3,
+                50,
+                cache_path,
+            )
+            self.assertFalse(cache_path.exists())
+        self.assertIsNone(embeddings)
+        self.assertEqual(status["state"], "failed_jaccard")
+
+    @patch("newsfeed.requests.post")
+    def test_embedding_batch_uses_header_and_clustering_prefix(self, post: Mock) -> None:
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"embeddings": [{"values": [0.1, 0.2, 0.3]}]}
+        post.return_value = response
+        vectors = fetch_embedding_batch(
+            [article("a", "Titel", "https://a.example/1", "Samenvatting")],
+            "secret",
+            "gemini-embedding-2",
+            3,
+        )
+        self.assertEqual(vectors[0].shape, (3,))
+        kwargs = post.call_args.kwargs
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "secret")
+        self.assertNotIn("params", kwargs)
+        request = kwargs["json"]["requests"][0]
+        self.assertEqual(request["embedContentConfig"]["outputDimensionality"], 3)
+        self.assertTrue(request["content"]["parts"][0]["text"].startswith("task: clustering | query:"))
+
+    def test_gemini_payload_uses_low_thinking_without_temperature(self) -> None:
+        item = article("a", "Titel", "https://a.example/1", "Samenvatting")
+        generation_config = gemini_payload([[item]])["generationConfig"]
+        self.assertNotIn("temperature", generation_config)
+        self.assertEqual(generation_config["thinkingConfig"]["thinkingLevel"], "LOW")
 
     def test_without_api_key_candidates_are_kept(self) -> None:
         items = [

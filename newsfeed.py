@@ -9,6 +9,7 @@ unavailable, or returns an invalid response, all non-exact articles are kept.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import html
 import json
@@ -28,6 +29,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import feedparser
+import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -37,7 +39,12 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = ROOT / "config" / "sources.json"
 DEFAULT_PUBLIC = ROOT / "public"
 DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
+DEFAULT_EMBEDDING_CACHE = ROOT / "data" / "embeddings.json"
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_EMBEDDING_ENDPOINT = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
+)
 USER_AGENT = "NieuwsfeedBot/1.0 (+https://github.com/miliaan82/nieuwsfeed)"
 MAX_FEED_BYTES = 5_000_000
 MAX_SUMMARY_CHARS = 2_000
@@ -422,6 +429,163 @@ def exact_deduplicate(articles: Iterable[Article]) -> tuple[list[Article], int]:
     return unique, removed
 
 
+def embedding_text(article: Article) -> str:
+    """Format only public RSS metadata for Embedding 2 clustering."""
+    content = clean_text(f"{article.title}\n{article.summary}", MAX_SUMMARY_CHARS + 500)
+    return f"task: clustering | query: {content}"
+
+
+def embedding_cache_id(article: Article) -> str:
+    fingerprint = hashlib.sha256(embedding_text(article).encode("utf-8")).hexdigest()[:16]
+    return f"{article.article_id}:{fingerprint}"
+
+
+def encode_embedding(values: np.ndarray) -> dict[str, Any]:
+    """Quantize a vector for a small, commit-friendly 72-hour cache."""
+    vector = np.asarray(values, dtype=np.float32)
+    peak = float(np.max(np.abs(vector))) if vector.size else 0.0
+    scale = peak / 127.0 if peak else 1.0
+    quantized = np.clip(np.rint(vector / scale), -127, 127).astype(np.int8)
+    return {
+        "scale": scale,
+        "values": base64.b64encode(quantized.tobytes()).decode("ascii"),
+    }
+
+
+def decode_embedding(value: dict[str, Any], dimensions: int) -> np.ndarray:
+    encoded = value.get("values")
+    scale = float(value.get("scale", 0))
+    if not isinstance(encoded, str) or scale <= 0:
+        raise ValueError("ongeldige embedding-cachewaarde")
+    vector = np.frombuffer(base64.b64decode(encoded, validate=True), dtype=np.int8)
+    if vector.size != dimensions:
+        raise ValueError("embedding-cache heeft onverwachte dimensies")
+    return vector.astype(np.float32) * scale
+
+
+def load_embedding_cache(path: Path, model: str, dimensions: int) -> dict[str, np.ndarray]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("model") != model or data.get("dimensions") != dimensions:
+            return {}
+        articles = data.get("articles")
+        if not isinstance(articles, dict):
+            return {}
+        return {
+            str(article_id): decode_embedding(value, dimensions)
+            for article_id, value in articles.items()
+            if isinstance(value, dict)
+        }
+    except Exception as exc:
+        logging.warning("Embedding-cache genegeerd: %s", exc)
+        return {}
+
+
+def fetch_embedding_batch(
+    articles: list[Article],
+    api_key: str,
+    model: str,
+    dimensions: int,
+) -> list[np.ndarray]:
+    endpoint = GEMINI_EMBEDDING_ENDPOINT.format(model=model)
+    requests_data = [
+        {
+            "model": f"models/{model}",
+            "content": {"parts": [{"text": embedding_text(article)}]},
+            "embedContentConfig": {"outputDimensionality": dimensions},
+        }
+        for article in articles
+    ]
+    response = requests.post(
+        endpoint,
+        json={"requests": requests_data},
+        headers={
+            "User-Agent": USER_AGENT,
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
+        },
+        timeout=(10, 90),
+    )
+    response.raise_for_status()
+    embeddings = response.json().get("embeddings")
+    if not isinstance(embeddings, list) or len(embeddings) != len(articles):
+        raise ValueError("Gemini gaf niet voor ieder artikel een embedding terug")
+
+    vectors: list[np.ndarray] = []
+    for embedding in embeddings:
+        values = embedding.get("values") if isinstance(embedding, dict) else None
+        vector = np.asarray(values, dtype=np.float32)
+        if vector.shape != (dimensions,) or not np.all(np.isfinite(vector)):
+            raise ValueError("Gemini gaf een ongeldige embedding terug")
+        vectors.append(vector)
+    return vectors
+
+
+def get_embeddings(
+    articles: list[Article],
+    api_key: str | None,
+    model: str,
+    dimensions: int,
+    batch_size: int,
+    cache_path: Path = DEFAULT_EMBEDDING_CACHE,
+) -> tuple[dict[str, np.ndarray] | None, dict[str, Any]]:
+    base_status: dict[str, Any] = {
+        "model": model,
+        "dimensions": dimensions,
+        "articles": len(articles),
+        "cached": 0,
+        "requested": 0,
+    }
+    if not api_key:
+        return None, {**base_status, "state": "not_configured_jaccard"}
+    if not articles:
+        return {}, {**base_status, "state": "no_articles"}
+
+    cached_by_key = load_embedding_cache(cache_path, model, dimensions)
+    cached = {
+        article.article_id: cached_by_key[embedding_cache_id(article)]
+        for article in articles
+        if embedding_cache_id(article) in cached_by_key
+    }
+    missing = [article for article in articles if article.article_id not in cached]
+    base_status["cached"] = len(cached)
+    base_status["requested"] = len(missing)
+
+    try:
+        fresh: dict[str, np.ndarray] = {}
+        for start in range(0, len(missing), batch_size):
+            batch = missing[start : start + batch_size]
+            vectors = fetch_embedding_batch(batch, api_key, model, dimensions)
+            fresh.update(
+                (article.article_id, vector)
+                for article, vector in zip(batch, vectors, strict=True)
+            )
+        combined = {**cached, **fresh}
+        if len(combined) != len(articles):
+            raise ValueError("niet voor ieder artikel is een embedding beschikbaar")
+
+        cache_data = {
+            "model": model,
+            "dimensions": dimensions,
+            "updated_at": utc_now().isoformat(),
+            "articles": {
+                embedding_cache_id(article): encode_embedding(combined[article.article_id])
+                for article in articles
+            },
+        }
+        write_atomic(cache_path, json.dumps(cache_data, separators=(",", ":")) + "\n")
+        return combined, {**base_status, "state": "ok"}
+    except Exception as exc:
+        logging.error("Embeddings mislukt; lokale Jaccard-clustering actief: %s", exc)
+        return None, {
+            **base_status,
+            "state": "failed_jaccard",
+            "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+        }
+
+
 def jaccard(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
@@ -443,7 +607,12 @@ def likely_same_event(left: Article, right: Article, window: timedelta) -> bool:
     return all_shared >= 4 and jaccard(left_all, right_all) >= 0.13
 
 
-def candidate_clusters(articles: list[Article], window_hours: int) -> list[list[Article]]:
+def candidate_clusters(
+    articles: list[Article],
+    window_hours: int,
+    embeddings: dict[str, np.ndarray] | None = None,
+    similarity_threshold: float = 0.78,
+) -> list[list[Article]]:
     parent = list(range(len(articles)))
 
     def find(item: int) -> int:
@@ -458,10 +627,24 @@ def candidate_clusters(articles: list[Article], window_hours: int) -> list[list[
             parent[right_root] = left_root
 
     window = timedelta(hours=window_hours)
+    similarities: np.ndarray | None = None
+    if embeddings is not None and articles:
+        matrix = np.stack([embeddings[article.article_id] for article in articles])
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        if np.any(norms == 0) or not np.all(np.isfinite(norms)):
+            raise ValueError("ongeldige embeddingmatrix")
+        normalized = matrix / norms
+        similarities = normalized @ normalized.T
     for left_index, left in enumerate(articles):
         for right_index in range(left_index + 1, len(articles)):
             right = articles[right_index]
-            if likely_same_event(left, right, window):
+            within_window = abs(left.published - right.published) <= window
+            semantic_match = (
+                similarities is not None
+                and within_window
+                and float(similarities[left_index, right_index]) >= similarity_threshold
+            )
+            if semantic_match or likely_same_event(left, right, window):
                 union(left_index, right_index)
 
     grouped: dict[int, list[Article]] = {}
@@ -512,7 +695,7 @@ Geef uitsluitend JSON terug volgens het opgegeven schema. Zet in remove alleen d
             }
         ],
         "generationConfig": {
-            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "LOW"},
             "responseMimeType": "application/json",
             "responseSchema": schema,
         },
@@ -657,6 +840,16 @@ def display_ai_state(state: str) -> str:
     return labels.get(state, state)
 
 
+def display_embedding_state(state: str) -> str:
+    labels = {
+        "ok": "Semantische voorselectie actief",
+        "no_articles": "Geen artikelen om te embedden",
+        "not_configured_jaccard": "Lokale voorselectie (API-sleutel ontbreekt)",
+        "failed_jaccard": "Lokale voorselectie (embeddings faalden)",
+    }
+    return labels.get(state, state)
+
+
 def render_status_page(status: dict[str, Any]) -> str:
     sources = status["sources"]
     rows = []
@@ -676,6 +869,12 @@ def render_status_page(status: dict[str, Any]) -> str:
         )
     ai_state = status["gemini"]["state"]
     warning = " warning" if ai_state in {"not_configured_exact_only", "failed_exact_only"} else ""
+    embedding_state = status["embeddings"]["state"]
+    embedding_warning = (
+        " warning"
+        if embedding_state in {"not_configured_jaccard", "failed_jaccard"}
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="nl">
 <head>
@@ -714,6 +913,8 @@ def render_status_page(status: dict[str, Any]) -> str:
     <div class="card"><span class="number">{status["articles_published"]}</span>artikelen in 72 uur</div>
     <div class="card"><span class="number">{status["articles_excluded_by_filter"]}</span>sportartikelen uitgesloten</div>
     <div class="card"><span class="number">{status["exact_duplicates_removed"]}</span>exacte dubbelen verwijderd</div>
+    <div class="card{embedding_warning}"><strong>{html.escape(display_embedding_state(embedding_state))}</strong><br>
+      <span class="muted">{status["embeddings"]["cached"]} uit cache, {status["embeddings"]["requested"]} aangevraagd</span></div>
     <div class="card{warning}"><strong>{html.escape(display_ai_state(ai_state))}</strong><br>
       <span class="muted">{status["gemini"]["removed"]} semantische dubbelen verwijderd</span></div>
   </section>
@@ -732,6 +933,27 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
     cluster_window_hours = int(os.getenv("CLUSTER_WINDOW_HOURS", config.get("cluster_window_hours", 36)))
     cutoff = now - timedelta(hours=history_hours)
     model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    embedding_model = os.getenv(
+        "GEMINI_EMBEDDING_MODEL", config.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
+    )
+    embedding_dimensions = int(
+        os.getenv("EMBEDDING_DIMENSIONS", config.get("embedding_dimensions", 768))
+    )
+    embedding_similarity_threshold = float(
+        os.getenv(
+            "EMBEDDING_SIMILARITY_THRESHOLD",
+            config.get("embedding_similarity_threshold", 0.78),
+        )
+    )
+    embedding_batch_size = int(
+        os.getenv("EMBEDDING_BATCH_SIZE", config.get("embedding_batch_size", 50))
+    )
+    if embedding_dimensions <= 0:
+        raise ValueError("EMBEDDING_DIMENSIONS moet positief zijn")
+    if not 0 < embedding_similarity_threshold <= 1:
+        raise ValueError("EMBEDDING_SIMILARITY_THRESHOLD moet tussen 0 en 1 liggen")
+    if not 1 <= embedding_batch_size <= 100:
+        raise ValueError("EMBEDDING_BATCH_SIZE moet tussen 1 en 100 liggen")
     public_base_url = os.getenv(
         "PUBLIC_BASE_URL", "https://miliaan82.github.io/nieuwsfeed"
     ).rstrip("/")
@@ -751,9 +973,22 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
         source_statuses.append(source_status)
 
     exact_unique, exact_removed = exact_deduplicate([*fetched, *previous])
-    clusters = candidate_clusters(exact_unique, cluster_window_hours)
+    api_key = os.getenv("GEMINI_API_KEY")
+    embeddings, embedding_status = get_embeddings(
+        exact_unique,
+        api_key,
+        embedding_model,
+        embedding_dimensions,
+        embedding_batch_size,
+    )
+    clusters = candidate_clusters(
+        exact_unique,
+        cluster_window_hours,
+        embeddings,
+        embedding_similarity_threshold,
+    )
     final_articles, gemini_status = review_with_gemini(
-        exact_unique, clusters, os.getenv("GEMINI_API_KEY"), model
+        exact_unique, clusters, api_key, model
     )
     final_articles = [article for article in final_articles if article.published >= cutoff]
 
@@ -770,6 +1005,10 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
         "articles_after_exact_deduplication": len(exact_unique),
         "articles_published": len(final_articles),
         "exact_duplicates_removed": exact_removed,
+        "embeddings": {
+            **embedding_status,
+            "similarity_threshold": embedding_similarity_threshold,
+        },
         "gemini": gemini_status,
         "sources_ok": sum(source.ok for source in source_statuses),
         "sources_failed": sum(not source.ok for source in source_statuses),
