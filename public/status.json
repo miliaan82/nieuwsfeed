@@ -1,20 +1,20 @@
 {
-  "generated_at": "2026-09-22T20:42:55.584824+00:00",
+  "generated_at": "2026-09-22T21:12:25.015181+00:00",
   "history_hours": 72,
   "cluster_window_hours": 36,
   "articles_fetched": 255,
-  "articles_from_previous_feed": 273,
+  "articles_from_previous_feed": 276,
   "articles_excluded_by_filter": 27,
   "previous_articles_excluded_by_filter": 0,
-  "articles_after_exact_deduplication": 276,
-  "articles_published": 276,
-  "exact_duplicates_removed": 252,
+  "articles_after_exact_deduplication": 280,
+  "articles_published": 280,
+  "exact_duplicates_removed": 251,
   "embeddings": {
     "model": "gemini-embedding-2",
     "dimensions": 768,
-    "articles": 276,
+    "articles": 280,
     "cached": 0,
-    "requested": 276,
+    "requested": 280,
     "state": "failed_jaccard",
     "error": "HTTPError: 429 Client Error: Too Many Requests for url: https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents",
     "similarity_threshold": 0.78
@@ -36,7 +36,7 @@
       "fetched_items": 30,
       "accepted_items": 24,
       "excluded_items": 6,
-      "duration_ms": 272,
+      "duration_ms": 86,
       "error": null
     },
     {
@@ -46,17 +46,17 @@
       "fetched_items": 20,
       "accepted_items": 20,
       "excluded_items": 0,
-      "duration_ms": 942,
+      "duration_ms": 1047,
       "error": null
     },
     {
       "name": "de Volkskrant",
       "url": "https://www.volkskrant.nl/voorpagina/rss.xml",
       "ok": true,
-      "fetched_items": 77,
+      "fetched_items": 76,
       "accepted_items": 58,
       "excluded_items": 3,
-      "duration_ms": 375,
+      "duration_ms": 427,
       "error": null
     },
     {
@@ -66,7 +66,7 @@
       "fetched_items": 93,
       "accepted_items": 61,
       "excluded_items": 5,
-      "duration_ms": 448,
+      "duration_ms": 594,
       "error": null
     },
     {
@@ -76,17 +76,17 @@
       "fetched_items": 30,
       "accepted_items": 20,
       "excluded_items": 10,
-      "duration_ms": 471,
+      "duration_ms": 280,
       "error": null
     },
     {
       "name": "Het Parool",
       "url": "https://www.parool.nl/voorpagina/rss.xml",
       "ok": true,
-      "fetched_items": 100,
+      "fetched_items": 99,
       "accepted_items": 43,
       "excluded_items": 3,
-      "duration_ms": 445,
+      "duration_ms": 396,
       "error": null
     },
     {
@@ -96,7 +96,7 @@
       "fetched_items": 20,
       "accepted_items": 20,
       "excluded_items": 0,
-      "duration_ms": 305,
+      "duration_ms": 342,
       "error": null
     },
     {
@@ -106,7 +106,7 @@
       "fetched_items": 100,
       "accepted_items": 0,
       "excluded_items": 0,
-      "duration_ms": 472,
+      "duration_ms": 441,
       "error": null
     },
     {
@@ -116,7 +116,7 @@
       "fetched_items": 60,
       "accepted_items": 1,
       "excluded_items": 0,
-      "duration_ms": 138,
+      "duration_ms": 307,
       "error": null
     },
     {
@@ -126,7 +126,7 @@
       "fetched_items": 8,
       "accepted_items": 8,
       "excluded_items": 0,
-      "duration_ms": 638,
+      "duration_ms": 566,
       "error": null
     }
   ]
