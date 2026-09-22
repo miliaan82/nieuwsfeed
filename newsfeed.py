@@ -1,0 +1,725 @@
+#!/usr/bin/env python3
+"""Build a deduplicated RSS feed from configured source feeds.
+
+Only data already present in the RSS feeds is processed. Article pages are never
+downloaded. Semantic removal is deliberately fail-safe: if Gemini is absent,
+unavailable, or returns an invalid response, all non-exact articles are kept.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import json
+import logging
+import os
+import re
+import sys
+import time
+import unicodedata
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import feedparser
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_CONFIG = ROOT / "config" / "sources.json"
+DEFAULT_PUBLIC = ROOT / "public"
+DEFAULT_MODEL = "gemini-3.8-flash"
+GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+USER_AGENT = "NieuwsfeedBot/1.0 (+https://github.com/miliaan82/nieuwsfeed)"
+MAX_FEED_BYTES = 5_000_000
+MAX_SUMMARY_CHARS = 2_000
+MAX_GEMINI_SUMMARY_CHARS = 700
+ATOM_NS = "http://www.w3.org/2005/Atom"
+NF_NS = "https://miliaan82.github.io/nieuwsfeed/ns"
+
+TRACKING_PARAMETERS = {
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "referrer",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
+
+STOPWORDS = {
+    # Dutch
+    "aan", "als", "bij", "dan", "dat", "de", "den", "der", "deze", "die",
+    "dit", "door", "een", "en", "er", "geen", "haar", "hebben", "het", "hoe",
+    "hun", "in", "is", "maar", "meer", "met", "na", "naar", "niet", "nog", "nu",
+    "of", "om", "onder", "ook", "op", "over", "te", "tegen", "tot", "uit", "van",
+    "voor", "was", "wat", "weer", "wel", "werd", "wordt", "zijn", "zo",
+    # English
+    "a", "about", "after", "an", "and", "are", "as", "at", "be", "by", "for",
+    "from", "has", "have", "how", "in", "into", "is", "it", "its", "more", "new",
+    "not", "of", "on", "or", "that", "the", "their", "this", "to", "was", "what",
+    "when", "will", "with",
+}
+
+
+class TextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+@dataclass(slots=True)
+class Article:
+    article_id: str
+    title: str
+    link: str
+    summary: str
+    source: str
+    source_url: str
+    published: datetime
+    fetched_at: datetime
+
+    def to_prompt_dict(self) -> dict[str, str]:
+        return {
+            "id": self.article_id,
+            "source": self.source,
+            "published": self.published.isoformat(),
+            "title": self.title,
+            "summary": self.summary[:MAX_GEMINI_SUMMARY_CHARS],
+            "url": self.link,
+        }
+
+
+@dataclass(slots=True)
+class SourceStatus:
+    name: str
+    url: str
+    ok: bool
+    fetched_items: int
+    accepted_items: int
+    duration_ms: int
+    error: str | None = None
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def clean_text(value: Any, limit: int = MAX_SUMMARY_CHARS) -> str:
+    if not value:
+        return ""
+    parser = TextExtractor()
+    try:
+        parser.feed(str(value))
+        text = " ".join(parser.parts)
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", str(value))
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def canonicalize_url(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    try:
+        parts = urlsplit(value)
+        scheme = parts.scheme.lower()
+        hostname = (parts.hostname or "").lower()
+        port = parts.port
+        netloc = hostname
+        if port and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
+            netloc = f"{hostname}:{port}"
+        path = re.sub(r"/{2,}", "/", parts.path or "/")
+        if path != "/":
+            path = path.rstrip("/")
+        query = urlencode(
+            sorted(
+                (key, val)
+                for key, val in parse_qsl(parts.query, keep_blank_values=True)
+                if key.lower() not in TRACKING_PARAMETERS and not key.lower().startswith("utm_")
+            )
+        )
+        return urlunsplit((scheme, netloc, path, query, ""))
+    except ValueError:
+        return value.split("#", 1)[0]
+
+
+def normalized_text(value: str) -> str:
+    value = unicodedata.normalize("NFKC", clean_text(value).lower())
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def content_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in normalized_text(value).split()
+        if token not in STOPWORDS and (len(token) >= 3 or token.isdigit())
+    }
+
+
+def stable_article_id(link: str, source: str, guid: str, title: str) -> str:
+    seed = canonicalize_url(link) or f"{source}|{guid}|{normalized_text(title)}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+
+
+def parsed_datetime(entry: Any, fallback: datetime) -> datetime:
+    for field in ("published_parsed", "updated_parsed", "created_parsed"):
+        parsed = entry.get(field)
+        if parsed:
+            try:
+                return datetime(*parsed[:6], tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                pass
+    return fallback
+
+
+def create_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.headers.update(
+        {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
+        }
+    )
+    return session
+
+
+def fetch_source(
+    session: requests.Session,
+    source: dict[str, Any],
+    now: datetime,
+    cutoff: datetime,
+) -> tuple[list[Article], SourceStatus]:
+    started = time.monotonic()
+    name = str(source["name"])
+    url = str(source["url"])
+    try:
+        response = session.get(url, timeout=(8, 25), stream=True)
+        response.raise_for_status()
+        raw = response.raw.read(MAX_FEED_BYTES + 1, decode_content=True)
+        if len(raw) > MAX_FEED_BYTES:
+            raise ValueError(f"feed is groter dan {MAX_FEED_BYTES} bytes")
+        parsed = feedparser.parse(raw)
+        if parsed.bozo and not parsed.entries:
+            raise ValueError(f"ongeldige feed: {parsed.bozo_exception}")
+
+        articles: list[Article] = []
+        for entry in parsed.entries:
+            title = clean_text(entry.get("title"), 500)
+            link = canonicalize_url(str(entry.get("link", "")))
+            summary = clean_text(entry.get("summary") or entry.get("description"))
+            published = parsed_datetime(entry, now)
+            if published > now + timedelta(hours=2):
+                published = now
+            if published < cutoff or not title or not link:
+                continue
+            guid = str(entry.get("id") or entry.get("guid") or "")
+            articles.append(
+                Article(
+                    article_id=stable_article_id(link, name, guid, title),
+                    title=title,
+                    link=link,
+                    summary=summary,
+                    source=name,
+                    source_url=url,
+                    published=published,
+                    fetched_at=now,
+                )
+            )
+        status = SourceStatus(
+            name=name,
+            url=url,
+            ok=True,
+            fetched_items=len(parsed.entries),
+            accepted_items=len(articles),
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
+        return articles, status
+    except Exception as exc:
+        logging.warning("Bron %s mislukt: %s", name, exc)
+        status = SourceStatus(
+            name=name,
+            url=url,
+            ok=False,
+            fetched_items=0,
+            accepted_items=0,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            error=f"{type(exc).__name__}: {str(exc)[:240]}",
+        )
+        return [], status
+
+
+def parse_iso_datetime(value: str | None, fallback: datetime) -> datetime:
+    if not value:
+        return fallback
+    try:
+        return ensure_utc(datetime.fromisoformat(value.replace("Z", "+00:00")))
+    except ValueError:
+        return fallback
+
+
+def load_previous_articles(path: Path, cutoff: datetime, now: datetime) -> list[Article]:
+    if not path.exists():
+        return []
+    parsed = feedparser.parse(path.read_bytes())
+    articles: list[Article] = []
+    for entry in parsed.entries:
+        title = clean_text(entry.get("title"), 500)
+        link = canonicalize_url(str(entry.get("link", "")))
+        published = parsed_datetime(entry, now)
+        if published < cutoff or not title or not link:
+            continue
+        source_data = entry.get("source") or {}
+        source = clean_text(source_data.get("title") if isinstance(source_data, dict) else source_data) or "Onbekend"
+        source_url = str(source_data.get("href", "")) if isinstance(source_data, dict) else ""
+        article_id = str(entry.get("nf_articleid") or "")
+        if not article_id:
+            raw_id = str(entry.get("id") or "")
+            article_id = raw_id.rsplit(":", 1)[-1] if raw_id else stable_article_id(link, source, raw_id, title)
+        articles.append(
+            Article(
+                article_id=article_id,
+                title=title,
+                link=link,
+                summary=clean_text(entry.get("summary") or entry.get("description")),
+                source=source,
+                source_url=source_url,
+                published=published,
+                fetched_at=parse_iso_datetime(entry.get("nf_fetchedat"), published),
+            )
+        )
+    return articles
+
+
+def exact_deduplicate(articles: Iterable[Article]) -> tuple[list[Article], int]:
+    ordered = sorted(articles, key=lambda article: article.published, reverse=True)
+    seen_urls: set[str] = set()
+    seen_content: set[str] = set()
+    unique: list[Article] = []
+    removed = 0
+    for article in ordered:
+        url_key = canonicalize_url(article.link)
+        content_key = normalized_text(f"{article.title} {article.summary}")
+        if (url_key and url_key in seen_urls) or (content_key and content_key in seen_content):
+            removed += 1
+            continue
+        if url_key:
+            seen_urls.add(url_key)
+        if content_key:
+            seen_content.add(content_key)
+        unique.append(article)
+    return unique, removed
+
+
+def jaccard(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def likely_same_event(left: Article, right: Article, window: timedelta) -> bool:
+    if abs(left.published - right.published) > window:
+        return False
+    left_title = content_tokens(left.title)
+    right_title = content_tokens(right.title)
+    title_shared = len(left_title & right_title)
+    title_score = jaccard(left_title, right_title)
+    if title_shared >= 2 and title_score >= 0.22:
+        return True
+    left_all = content_tokens(f"{left.title} {left.summary[:500]}")
+    right_all = content_tokens(f"{right.title} {right.summary[:500]}")
+    all_shared = len(left_all & right_all)
+    return all_shared >= 4 and jaccard(left_all, right_all) >= 0.13
+
+
+def candidate_clusters(articles: list[Article], window_hours: int) -> list[list[Article]]:
+    parent = list(range(len(articles)))
+
+    def find(item: int) -> int:
+        while parent[item] != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    window = timedelta(hours=window_hours)
+    for left_index, left in enumerate(articles):
+        for right_index in range(left_index + 1, len(articles)):
+            right = articles[right_index]
+            if likely_same_event(left, right, window):
+                union(left_index, right_index)
+
+    grouped: dict[int, list[Article]] = {}
+    for index, article in enumerate(articles):
+        grouped.setdefault(find(index), []).append(article)
+    return [cluster for cluster in grouped.values() if len(cluster) > 1]
+
+
+def gemini_payload(clusters: list[list[Article]]) -> dict[str, Any]:
+    cluster_data = [
+        {"cluster": index + 1, "articles": [article.to_prompt_dict() for article in cluster]}
+        for index, cluster in enumerate(clusters)
+    ]
+    instruction = """Je beoordeelt kandidaatclusters uit RSS-feeds op informatieduplicatie.
+
+Verwijder conservatief. Dezelfde gebeurtenis is NIET automatisch een duplicaat. Behoud een extra artikel als het nieuwe feiten, een primaire bron, technische of wetenschappelijke expertise, juridische/economische/maatschappelijke gevolgen, relevante onzekerheid, een correctie of nuance, of een wezenlijk andere interpretatie toevoegt. Een andere toon, kop of framing zonder extra informatiewaarde is onvoldoende om het te behouden.
+
+Gebruik uitsluitend de meegeleverde RSS-titel, RSS-samenvatting en metadata. Vul niets aan vanuit eigen kennis. Verwijder een artikel alleen wanneer een ander artikel in hetzelfde cluster alle relevante informatie minstens even goed bevat. Laat bij twijfel beide staan. Verwijder nooit alle artikelen uit een cluster.
+
+Geef uitsluitend JSON terug volgens het opgegeven schema. Zet in remove alleen daadwerkelijk redundante artikelen; duplicate_of moet verwijzen naar het behouden artikel in hetzelfde cluster."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "remove": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "duplicate_of": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["id", "duplicate_of", "reason"],
+                },
+            }
+        },
+        "required": ["remove"],
+    }
+    return {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": f"{instruction}\n\nKANDIDAATCLUSTERS:\n{json.dumps(cluster_data, ensure_ascii=False)}"
+                    }
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": schema,
+        },
+    }
+
+
+def extract_gemini_json(response_data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        parts = response_data["candidates"][0]["content"]["parts"]
+        text = "".join(str(part.get("text", "")) for part in parts)
+        return json.loads(text)
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Gemini gaf geen geldige JSON-respons") from exc
+
+
+def review_with_gemini(
+    articles: list[Article],
+    clusters: list[list[Article]],
+    api_key: str | None,
+    model: str,
+) -> tuple[list[Article], dict[str, Any]]:
+    if not clusters:
+        return articles, {"state": "no_candidates", "model": model, "removed": 0, "candidate_clusters": 0}
+    if not api_key:
+        return articles, {
+            "state": "not_configured_exact_only",
+            "model": model,
+            "removed": 0,
+            "candidate_clusters": len(clusters),
+        }
+
+    cluster_by_id: dict[str, set[str]] = {}
+    for cluster in clusters:
+        ids = {article.article_id for article in cluster}
+        for article_id in ids:
+            cluster_by_id[article_id] = ids
+
+    try:
+        endpoint = GEMINI_ENDPOINT.format(model=model)
+        response = requests.post(
+            endpoint,
+            json=gemini_payload(clusters),
+            headers={
+                "User-Agent": USER_AGENT,
+                "Content-Type": "application/json",
+                # Keep the secret out of URLs and therefore out of exception text/logs.
+                "x-goog-api-key": api_key,
+            },
+            timeout=(10, 90),
+        )
+        response.raise_for_status()
+        result = extract_gemini_json(response.json())
+        decisions = result.get("remove")
+        if not isinstance(decisions, list):
+            raise ValueError("Gemini-respons mist remove-lijst")
+
+        remove_ids: set[str] = set()
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                raise ValueError("Ongeldige verwijderbeslissing")
+            article_id = str(decision.get("id", ""))
+            duplicate_of = str(decision.get("duplicate_of", ""))
+            if (
+                article_id not in cluster_by_id
+                or duplicate_of not in cluster_by_id[article_id]
+                or article_id == duplicate_of
+            ):
+                raise ValueError("Gemini verwees naar een onbekend of ongeldig artikel")
+            remove_ids.add(article_id)
+
+        for cluster in clusters:
+            ids = {article.article_id for article in cluster}
+            if ids and ids <= remove_ids:
+                raise ValueError("Gemini wilde een volledig cluster verwijderen")
+
+        reviewed = [article for article in articles if article.article_id not in remove_ids]
+        return reviewed, {
+            "state": "ok",
+            "model": model,
+            "removed": len(remove_ids),
+            "candidate_clusters": len(clusters),
+        }
+    except Exception as exc:
+        logging.error("Gemini-beoordeling mislukt; fail-safe exact-only actief: %s", exc)
+        return articles, {
+            "state": "failed_exact_only",
+            "model": model,
+            "removed": 0,
+            "candidate_clusters": len(clusters),
+            "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+        }
+
+
+def write_atomic(path: Path, content: str | bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if isinstance(content, bytes):
+        temporary.write_bytes(content)
+    else:
+        temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def render_feed(articles: list[Article], generated_at: datetime, public_base_url: str) -> bytes:
+    ET.register_namespace("atom", ATOM_NS)
+    ET.register_namespace("nf", NF_NS)
+    rss = ET.Element("rss", {"version": "2.0"})
+    channel = ET.SubElement(rss, "channel")
+    ET.SubElement(channel, "title").text = "Persoonlijke nieuwsfeed"
+    ET.SubElement(channel, "link").text = public_base_url
+    ET.SubElement(channel, "description").text = (
+        "Nieuws uit geselecteerde bronnen, exact ontdubbeld en conservatief beoordeeld op informatiewaarde."
+    )
+    ET.SubElement(channel, "language").text = "nl-NL"
+    ET.SubElement(channel, "lastBuildDate").text = format_datetime(generated_at)
+    ET.SubElement(
+        channel,
+        f"{{{ATOM_NS}}}link",
+        {"href": f"{public_base_url}/feed.xml", "rel": "self", "type": "application/rss+xml"},
+    )
+    for article in sorted(articles, key=lambda item: item.published, reverse=True):
+        item = ET.SubElement(channel, "item")
+        ET.SubElement(item, "title").text = article.title
+        ET.SubElement(item, "link").text = article.link
+        ET.SubElement(item, "guid", {"isPermaLink": "false"}).text = f"urn:nieuwsfeed:{article.article_id}"
+        ET.SubElement(item, "pubDate").text = format_datetime(article.published)
+        ET.SubElement(item, "description").text = article.summary
+        ET.SubElement(item, "source", {"url": article.source_url}).text = article.source
+        ET.SubElement(item, f"{{{NF_NS}}}articleId").text = article.article_id
+        ET.SubElement(item, f"{{{NF_NS}}}fetchedAt").text = article.fetched_at.isoformat()
+    ET.indent(rss, space="  ")
+    return ET.tostring(rss, encoding="utf-8", xml_declaration=True)
+
+
+def display_ai_state(state: str) -> str:
+    labels = {
+        "ok": "Gemini-beoordeling geslaagd",
+        "no_candidates": "Geen kandidaatclusters",
+        "not_configured_exact_only": "Alleen exacte deduplicatie (API-sleutel ontbreekt)",
+        "failed_exact_only": "Alleen exacte deduplicatie (Gemini faalde)",
+    }
+    return labels.get(state, state)
+
+
+def render_status_page(status: dict[str, Any]) -> str:
+    sources = status["sources"]
+    rows = []
+    for source in sources:
+        state = "OK" if source["ok"] else "Fout"
+        detail = (
+            f'{source["accepted_items"]} actueel van {source["fetched_items"]} items'
+            if source["ok"]
+            else html.escape(source.get("error") or "Onbekende fout")
+        )
+        rows.append(
+            "<tr>"
+            f'<td><a href="{html.escape(source["url"], quote=True)}">{html.escape(source["name"])}</a></td>'
+            f'<td><span class="badge {"ok" if source["ok"] else "error"}">{state}</span></td>'
+            f"<td>{detail}</td><td>{source['duration_ms']} ms</td></tr>"
+        )
+    ai_state = status["gemini"]["state"]
+    warning = " warning" if ai_state in {"not_configured_exact_only", "failed_exact_only"} else ""
+    return f"""<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nieuwsfeed status</title>
+  <style>
+    :root {{ color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }}
+    body {{ margin: 0; background: #f4f6f8; color: #17202a; }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }}
+    h1 {{ margin-bottom: 8px; }}
+    .muted {{ color: #5d6d7e; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; margin: 24px 0; }}
+    .card {{ background: white; border: 1px solid #dfe6e9; border-radius: 12px; padding: 18px; }}
+    .card.warning {{ border-color: #e0a800; }}
+    .number {{ font-size: 1.8rem; font-weight: 750; display: block; }}
+    table {{ width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; }}
+    th, td {{ padding: 12px; border-bottom: 1px solid #e8ecef; text-align: left; vertical-align: top; }}
+    th {{ background: #eef2f5; }}
+    .badge {{ border-radius: 999px; padding: 3px 9px; font-size: .85rem; font-weight: 700; }}
+    .badge.ok {{ background: #d4edda; color: #155724; }}
+    .badge.error {{ background: #f8d7da; color: #721c24; }}
+    a {{ color: #075bc7; }}
+    @media (prefers-color-scheme: dark) {{
+      body {{ background: #111820; color: #edf2f7; }} .muted {{ color: #aab7c4; }}
+      .card, table {{ background: #18232e; border-color: #344454; }} th {{ background: #223140; }}
+      th, td {{ border-color: #344454; }} a {{ color: #7db5ff; }}
+    }}
+  </style>
+</head>
+<body><main>
+  <h1>Persoonlijke nieuwsfeed</h1>
+  <p class="muted">Laatst bijgewerkt: {html.escape(status["generated_at"])}</p>
+  <p><a href="feed.xml">Open RSS-feed</a> · <a href="status.json">Bekijk ruwe status</a></p>
+  <section class="cards">
+    <div class="card"><span class="number">{status["articles_published"]}</span>artikelen in 72 uur</div>
+    <div class="card"><span class="number">{status["exact_duplicates_removed"]}</span>exacte dubbelen verwijderd</div>
+    <div class="card{warning}"><strong>{html.escape(display_ai_state(ai_state))}</strong><br>
+      <span class="muted">{status["gemini"]["removed"]} semantische dubbelen verwijderd</span></div>
+  </section>
+  <h2>Bronnen</h2>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>Bron</th><th>Status</th><th>Resultaat</th><th>Duur</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table></div>
+</main></body></html>"""
+
+
+def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
+    now = utc_now()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    history_hours = int(os.getenv("HISTORY_HOURS", config.get("history_hours", 72)))
+    cluster_window_hours = int(os.getenv("CLUSTER_WINDOW_HOURS", config.get("cluster_window_hours", 36)))
+    cutoff = now - timedelta(hours=history_hours)
+    model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
+    public_base_url = os.getenv(
+        "PUBLIC_BASE_URL", "https://miliaan82.github.io/nieuwsfeed"
+    ).rstrip("/")
+
+    previous = load_previous_articles(public_dir / "feed.xml", cutoff, now)
+    session = create_session()
+    fetched: list[Article] = []
+    source_statuses: list[SourceStatus] = []
+    for source in config["sources"]:
+        if not source.get("enabled", True):
+            continue
+        articles, source_status = fetch_source(session, source, now, cutoff)
+        fetched.extend(articles)
+        source_statuses.append(source_status)
+
+    exact_unique, exact_removed = exact_deduplicate([*fetched, *previous])
+    clusters = candidate_clusters(exact_unique, cluster_window_hours)
+    final_articles, gemini_status = review_with_gemini(
+        exact_unique, clusters, os.getenv("GEMINI_API_KEY"), model
+    )
+    final_articles = [article for article in final_articles if article.published >= cutoff]
+
+    status: dict[str, Any] = {
+        "generated_at": now.isoformat(),
+        "history_hours": history_hours,
+        "cluster_window_hours": cluster_window_hours,
+        "articles_fetched": len(fetched),
+        "articles_from_previous_feed": len(previous),
+        "articles_after_exact_deduplication": len(exact_unique),
+        "articles_published": len(final_articles),
+        "exact_duplicates_removed": exact_removed,
+        "gemini": gemini_status,
+        "sources_ok": sum(source.ok for source in source_statuses),
+        "sources_failed": sum(not source.ok for source in source_statuses),
+        "sources": [asdict(source) for source in source_statuses],
+    }
+
+    feed_bytes = render_feed(final_articles, now, public_base_url)
+    ET.fromstring(feed_bytes)  # Validate before replacing the published feed.
+    write_atomic(public_dir / "feed.xml", feed_bytes)
+    write_atomic(public_dir / "status.json", json.dumps(status, ensure_ascii=False, indent=2) + "\n")
+    write_atomic(public_dir / "index.html", render_status_page(status))
+    return status
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--public-dir", type=Path, default=DEFAULT_PUBLIC)
+    parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
+    args = parser.parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    try:
+        status = build(args.config, args.public_dir)
+    except Exception:
+        logging.exception("Nieuwsfeed kon niet worden gegenereerd")
+        return 1
+    logging.info(
+        "Klaar: %d artikelen, %d bronnen geslaagd, Gemini=%s",
+        status["articles_published"],
+        status["sources_ok"],
+        status["gemini"]["state"],
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

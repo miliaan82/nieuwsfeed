@@ -1,0 +1,110 @@
+{
+  "generated_at": "2026-09-22T19:25:59.130318+00:00",
+  "history_hours": 72,
+  "cluster_window_hours": 36,
+  "articles_fetched": 269,
+  "articles_from_previous_feed": 269,
+  "articles_after_exact_deduplication": 269,
+  "articles_published": 269,
+  "exact_duplicates_removed": 269,
+  "gemini": {
+    "state": "not_configured_exact_only",
+    "model": "gemini-3.8-flash",
+    "removed": 0,
+    "candidate_clusters": 18
+  },
+  "sources_ok": 10,
+  "sources_failed": 0,
+  "sources": [
+    {
+      "name": "NU.nl",
+      "url": "https://www.nu.nl/rss/Algemeen",
+      "ok": true,
+      "fetched_items": 30,
+      "accepted_items": 30,
+      "duration_ms": 6137,
+      "error": null
+    },
+    {
+      "name": "NOS",
+      "url": "https://feeds.nos.nl/nosnieuwsalgemeen",
+      "ok": true,
+      "fetched_items": 20,
+      "accepted_items": 20,
+      "duration_ms": 6748,
+      "error": null
+    },
+    {
+      "name": "de Volkskrant",
+      "url": "https://www.volkskrant.nl/voorpagina/rss.xml",
+      "ok": true,
+      "fetched_items": 77,
+      "accepted_items": 60,
+      "duration_ms": 5623,
+      "error": null
+    },
+    {
+      "name": "Trouw",
+      "url": "https://www.trouw.nl/voorpagina/rss.xml",
+      "ok": true,
+      "fetched_items": 88,
+      "accepted_items": 56,
+      "duration_ms": 7477,
+      "error": null
+    },
+    {
+      "name": "AD",
+      "url": "https://www.ad.nl/home/rss.xml",
+      "ok": true,
+      "fetched_items": 30,
+      "accepted_items": 30,
+      "duration_ms": 6481,
+      "error": null
+    },
+    {
+      "name": "Het Parool",
+      "url": "https://www.parool.nl/voorpagina/rss.xml",
+      "ok": true,
+      "fetched_items": 99,
+      "accepted_items": 44,
+      "duration_ms": 6448,
+      "error": null
+    },
+    {
+      "name": "The Guardian — Artificial Intelligence",
+      "url": "https://www.theguardian.com/technology/artificialintelligenceai/rss",
+      "ok": true,
+      "fetched_items": 20,
+      "accepted_items": 20,
+      "duration_ms": 7103,
+      "error": null
+    },
+    {
+      "name": "Google DeepMind",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "ok": true,
+      "fetched_items": 100,
+      "accepted_items": 0,
+      "duration_ms": 8420,
+      "error": null
+    },
+    {
+      "name": "ScienceDaily — Artificial Intelligence",
+      "url": "https://www.sciencedaily.com/rss/computers_math/artificial_intelligence.xml",
+      "ok": true,
+      "fetched_items": 60,
+      "accepted_items": 1,
+      "duration_ms": 5518,
+      "error": null
+    },
+    {
+      "name": "Scientias.nl",
+      "url": "https://scientias.nl/feed/",
+      "ok": true,
+      "fetched_items": 8,
+      "accepted_items": 8,
+      "duration_ms": 6079,
+      "error": null
+    }
+  ]
+}

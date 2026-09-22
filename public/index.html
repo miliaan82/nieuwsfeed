@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nieuwsfeed status</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }
+    body { margin: 0; background: #f4f6f8; color: #17202a; }
+    main { max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }
+    h1 { margin-bottom: 8px; }
+    .muted { color: #5d6d7e; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 12px; margin: 24px 0; }
+    .card { background: white; border: 1px solid #dfe6e9; border-radius: 12px; padding: 18px; }
+    .card.warning { border-color: #e0a800; }
+    .number { font-size: 1.8rem; font-weight: 750; display: block; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; }
+    th, td { padding: 12px; border-bottom: 1px solid #e8ecef; text-align: left; vertical-align: top; }
+    th { background: #eef2f5; }
+    .badge { border-radius: 999px; padding: 3px 9px; font-size: .85rem; font-weight: 700; }
+    .badge.ok { background: #d4edda; color: #155724; }
+    .badge.error { background: #f8d7da; color: #721c24; }
+    a { color: #075bc7; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #111820; color: #edf2f7; } .muted { color: #aab7c4; }
+      .card, table { background: #18232e; border-color: #344454; } th { background: #223140; }
+      th, td { border-color: #344454; } a { color: #7db5ff; }
+    }
+  </style>
+</head>
+<body><main>
+  <h1>Persoonlijke nieuwsfeed</h1>
+  <p class="muted">Laatst bijgewerkt: 2026-09-22T19:25:59.130318+00:00</p>
+  <p><a href="feed.xml">Open RSS-feed</a> · <a href="status.json">Bekijk ruwe status</a></p>
+  <section class="cards">
+    <div class="card"><span class="number">269</span>artikelen in 72 uur</div>
+    <div class="card"><span class="number">269</span>exacte dubbelen verwijderd</div>
+    <div class="card warning"><strong>Alleen exacte deduplicatie (API-sleutel ontbreekt)</strong><br>
+      <span class="muted">0 semantische dubbelen verwijderd</span></div>
+  </section>
+  <h2>Bronnen</h2>
+  <div style="overflow-x:auto"><table>
+    <thead><tr><th>Bron</th><th>Status</th><th>Resultaat</th><th>Duur</th></tr></thead>
+    <tbody><tr><td><a href="https://www.nu.nl/rss/Algemeen">NU.nl</a></td><td><span class="badge ok">OK</span></td><td>30 actueel van 30 items</td><td>6137 ms</td></tr><tr><td><a href="https://feeds.nos.nl/nosnieuwsalgemeen">NOS</a></td><td><span class="badge ok">OK</span></td><td>20 actueel van 20 items</td><td>6748 ms</td></tr><tr><td><a href="https://www.volkskrant.nl/voorpagina/rss.xml">de Volkskrant</a></td><td><span class="badge ok">OK</span></td><td>60 actueel van 77 items</td><td>5623 ms</td></tr><tr><td><a href="https://www.trouw.nl/voorpagina/rss.xml">Trouw</a></td><td><span class="badge ok">OK</span></td><td>56 actueel van 88 items</td><td>7477 ms</td></tr><tr><td><a href="https://www.ad.nl/home/rss.xml">AD</a></td><td><span class="badge ok">OK</span></td><td>30 actueel van 30 items</td><td>6481 ms</td></tr><tr><td><a href="https://www.parool.nl/voorpagina/rss.xml">Het Parool</a></td><td><span class="badge ok">OK</span></td><td>44 actueel van 99 items</td><td>6448 ms</td></tr><tr><td><a href="https://www.theguardian.com/technology/artificialintelligenceai/rss">The Guardian — Artificial Intelligence</a></td><td><span class="badge ok">OK</span></td><td>20 actueel van 20 items</td><td>7103 ms</td></tr><tr><td><a href="https://deepmind.google/blog/rss.xml">Google DeepMind</a></td><td><span class="badge ok">OK</span></td><td>0 actueel van 100 items</td><td>8420 ms</td></tr><tr><td><a href="https://www.sciencedaily.com/rss/computers_math/artificial_intelligence.xml">ScienceDaily — Artificial Intelligence</a></td><td><span class="badge ok">OK</span></td><td>1 actueel van 60 items</td><td>5518 ms</td></tr><tr><td><a href="https://scientias.nl/feed/">Scientias.nl</a></td><td><span class="badge ok">OK</span></td><td>8 actueel van 8 items</td><td>6079 ms</td></tr></tbody>
+  </table></div>
+</main></body></html>

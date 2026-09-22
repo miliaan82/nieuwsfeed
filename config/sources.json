@@ -1,0 +1,66 @@
+{
+  "history_hours": 72,
+  "cluster_window_hours": 36,
+  "sources": [
+    {
+      "name": "NU.nl",
+      "url": "https://www.nu.nl/rss/Algemeen",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "NOS",
+      "url": "https://feeds.nos.nl/nosnieuwsalgemeen",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "de Volkskrant",
+      "url": "https://www.volkskrant.nl/voorpagina/rss.xml",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "Trouw",
+      "url": "https://www.trouw.nl/voorpagina/rss.xml",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "AD",
+      "url": "https://www.ad.nl/home/rss.xml",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "Het Parool",
+      "url": "https://www.parool.nl/voorpagina/rss.xml",
+      "language": "nl",
+      "enabled": true
+    },
+    {
+      "name": "The Guardian — Artificial Intelligence",
+      "url": "https://www.theguardian.com/technology/artificialintelligenceai/rss",
+      "language": "en",
+      "enabled": true
+    },
+    {
+      "name": "Google DeepMind",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "language": "en",
+      "enabled": true
+    },
+    {
+      "name": "ScienceDaily — Artificial Intelligence",
+      "url": "https://www.sciencedaily.com/rss/computers_math/artificial_intelligence.xml",
+      "language": "en",
+      "enabled": true
+    },
+    {
+      "name": "Scientias.nl",
+      "url": "https://scientias.nl/feed/",
+      "language": "nl",
+      "enabled": true
+    }
+  ]
+}
