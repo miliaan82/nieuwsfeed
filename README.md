@@ -1,6 +1,6 @@
 # Persoonlijke AI-nieuwsfeed
 
-Deze repository combineert tien RSS-bronnen tot één persoonlijke RSS-feed. De pipeline
+Deze repository combineert geselecteerde RSS-bronnen tot één persoonlijke RSS-feed. De pipeline
 verwijdert eerst exacte dubbelen, maakt daarna lokaal goedkope kandidaatclusters
 en stuurt uitsluitend die clusters naar Gemini. Artikelen over dezelfde gebeurtenis
 blijven staan wanneer ze aantoonbaar extra informatiewaarde hebben.

@@ -116,6 +116,13 @@
       "article_domains": ["scientias.nl"],
       "language": "nl",
       "enabled": true
+    },
+    {
+      "name": "Last Week in AI",
+      "url": "https://lastweekin.ai/feed",
+      "article_domains": ["lastweekin.ai", "substack.com"],
+      "language": "en",
+      "enabled": true
     }
   ]
 }
