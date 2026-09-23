@@ -405,11 +405,33 @@ def parse_iso_datetime(value: str | None, fallback: datetime) -> datetime:
         return fallback
 
 
+def build_source_cutoffs(
+    sources: Iterable[dict[str, Any]],
+    now: datetime,
+    default_history_hours: int,
+) -> tuple[dict[str, datetime], dict[str, int]]:
+    if not 1 <= default_history_hours <= 720:
+        raise ValueError("HISTORY_HOURS moet tussen 1 en 720 liggen")
+
+    cutoffs: dict[str, datetime] = {}
+    overrides: dict[str, int] = {}
+    for source in sources:
+        name = str(source["name"])
+        history_hours = int(source.get("history_hours", default_history_hours))
+        if not 1 <= history_hours <= 720:
+            raise ValueError(f"history_hours voor {name} moet tussen 1 en 720 liggen")
+        cutoffs[name] = now - timedelta(hours=history_hours)
+        if history_hours != default_history_hours:
+            overrides[name] = history_hours
+    return cutoffs, overrides
+
+
 def load_previous_articles(
     path: Path,
     cutoff: datetime,
     now: datetime,
     rules: ExclusionRules,
+    source_cutoffs: dict[str, datetime] | None = None,
 ) -> tuple[list[Article], int]:
     if not path.exists():
         return [], 0
@@ -423,11 +445,12 @@ def load_previous_articles(
             excluded_items += 1
             continue
         published = parsed_datetime(entry, now)
-        if published < cutoff or not title or not link:
-            continue
         source_data = entry.get("source") or {}
         source = clean_text(source_data.get("title") if isinstance(source_data, dict) else source_data) or "Onbekend"
         source_url = str(source_data.get("href", "")) if isinstance(source_data, dict) else ""
+        article_cutoff = (source_cutoffs or {}).get(source, cutoff)
+        if published < article_cutoff or not title or not link:
+            continue
         article_id = str(entry.get("nf_articleid") or "")
         if not article_id:
             raw_id = str(entry.get("id") or "")
@@ -1200,6 +1223,11 @@ def render_status_page(status: dict[str, Any]) -> str:
         }
         else ""
     )
+    article_window_label = (
+        "artikelen binnen bronvensters"
+        if status.get("source_history_hours")
+        else f'artikelen in {status["history_hours"]} uur'
+    )
     return f"""<!doctype html>
 <html lang="nl">
 <head>
@@ -1237,7 +1265,7 @@ def render_status_page(status: dict[str, Any]) -> str:
   <p class="muted">Laatst bijgewerkt: {html.escape(status["generated_at"])}</p>
   <p><a href="feed.xml">Open RSS-feed</a> · <a href="status.json">Bekijk ruwe status</a></p>
   <section class="cards">
-    <div class="card"><span class="number">{status["articles_published"]}</span>artikelen in 72 uur</div>
+    <div class="card"><span class="number">{status["articles_published"]}</span>{article_window_label}</div>
     <div class="card"><span class="number">{status["articles_excluded_by_filter"]}</span>sportartikelen uitgesloten</div>
     <div class="card"><span class="number">{status["exact_duplicates_removed"]}</span>exacte dubbelen verwijderd</div>
     <div class="card"><strong>Paginametadata</strong><br>
@@ -1261,6 +1289,9 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
     history_hours = int(os.getenv("HISTORY_HOURS", config.get("history_hours", 72)))
     cluster_window_hours = int(os.getenv("CLUSTER_WINDOW_HOURS", config.get("cluster_window_hours", 36)))
     cutoff = now - timedelta(hours=history_hours)
+    source_cutoffs, source_history_hours = build_source_cutoffs(
+        config["sources"], now, history_hours
+    )
     model = os.getenv("GEMINI_MODEL", DEFAULT_MODEL)
     embedding_model = os.getenv(
         "GEMINI_EMBEDDING_MODEL", config.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
@@ -1309,7 +1340,7 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
         else public_dir / "feed.xml"
     )
     previous, previous_excluded = load_previous_articles(
-        previous_feed_path, cutoff, now, rules
+        previous_feed_path, cutoff, now, rules, source_cutoffs
     )
     session = create_session()
     fetched: list[Article] = []
@@ -1317,7 +1348,10 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
     for source in config["sources"]:
         if not source.get("enabled", True):
             continue
-        articles, source_status = fetch_source(session, source, now, cutoff, rules)
+        source_cutoff = source_cutoffs.get(str(source["name"]), cutoff)
+        articles, source_status = fetch_source(
+            session, source, now, source_cutoff, rules
+        )
         fetched.extend(articles)
         source_statuses.append(source_status)
 
@@ -1346,11 +1380,16 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
     final_articles, gemini_status = review_with_gemini(
         exact_unique, clusters, api_key, model
     )
-    final_articles = [article for article in final_articles if article.published >= cutoff]
+    final_articles = [
+        article
+        for article in final_articles
+        if article.published >= source_cutoffs.get(article.source, cutoff)
+    ]
 
     status: dict[str, Any] = {
         "generated_at": now.isoformat(),
         "history_hours": history_hours,
+        "source_history_hours": source_history_hours,
         "cluster_window_hours": cluster_window_hours,
         "articles_fetched": len(fetched),
         "articles_from_previous_feed": len(previous),

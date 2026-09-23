@@ -122,6 +122,7 @@
       "url": "https://lastweekin.ai/feed",
       "article_domains": ["lastweekin.ai", "substack.com"],
       "language": "en",
+      "history_hours": 240,
       "enabled": true
     }
   ]

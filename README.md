@@ -15,8 +15,9 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 2. `newsfeed.py` haalt de RSS-feeds op.
 3. Sportartikelen worden verwijderd op basis van de RSS-categorie, het URL-pad en
    een beperkte titelcontrole. De regels staan in `config/sources.json`.
-4. De aggregator voegt de nieuwe items samen met maximaal 72 uur historie uit een
-   private GitHub Actions-cache.
+4. De aggregator voegt nieuwe items samen met 72 uur historie uit een private
+   GitHub Actions-cache. Langzamere nieuwsbriefbronnen kunnen een eigen, ruimer
+   venster krijgen zodat de nieuwste editie zichtbaar blijft.
 5. Exact gelijke URL's (zonder trackingparameters) en exact gelijke RSS-inhoud
    worden lokaal verwijderd.
 6. Alleen wanneer een RSS-samenvatting ontbreekt of erg kort is, leest de bot een
@@ -41,7 +42,7 @@ Als de API-sleutel ontbreekt, Gemini niet bereikbaar is, het gratis quotum op is
 of de respons ongeldig is,
 wordt geen enkel mogelijk inhoudelijk duplicaat verwijderd. Alleen de voorafgaande
 exacte deduplicatie blijft dan actief. Een bronstoring blokkeert de overige bronnen
-niet; nog geldige items uit de vorige feed blijven maximaal 72 uur beschikbaar.
+niet; nog geldige items uit de vorige feed blijven binnen hun bronvenster beschikbaar.
 
 ## Eenmalige configuratie op GitHub
 

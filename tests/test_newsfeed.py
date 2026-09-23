@@ -1,7 +1,7 @@
 import re
 import unittest
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -11,6 +11,7 @@ import numpy as np
 from newsfeed import (
     Article,
     ExclusionRules,
+    build_source_cutoffs,
     candidate_clusters,
     canonicalize_url,
     decode_embedding,
@@ -103,6 +104,19 @@ class NewsfeedTests(unittest.TestCase):
             "https://example.com/news?id=2",
         )
         self.assertEqual(canonicalize_url("javascript:alert(1)"), "")
+
+    def test_weekly_source_can_use_a_longer_history_window(self) -> None:
+        cutoffs, overrides = build_source_cutoffs(
+            [
+                {"name": "Dagelijks"},
+                {"name": "Wekelijks", "history_hours": 240},
+            ],
+            NOW,
+            72,
+        )
+        self.assertEqual(cutoffs["Dagelijks"], NOW - timedelta(hours=72))
+        self.assertEqual(cutoffs["Wekelijks"], NOW - timedelta(hours=240))
+        self.assertEqual(overrides, {"Wekelijks": 240})
 
     @patch("newsfeed.hostname_is_public", return_value=True)
     def test_metadata_url_requires_https_and_allowlisted_domain(self, _public: Mock) -> None:
