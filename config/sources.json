@@ -28,7 +28,13 @@
       "atletiek",
       "olympische-spelen",
       "esports",
-      "e-sports"
+      "e-sports",
+      "show",
+      "entertainment",
+      "celebrity",
+      "royalty",
+      "sterren",
+      "achterklap"
     ],
     "exclude_category_terms": [
       "sport",
@@ -39,7 +45,13 @@
       "hockey",
       "basketbal",
       "motorsport",
-      "autosport"
+      "autosport",
+      "show",
+      "entertainment",
+      "celebrity",
+      "royalty",
+      "sterren",
+      "achterklap"
     ],
     "exclude_title_patterns": [
       "\\b(sport\\w*|hengelsport\\w*|voetbal\\w*|wielren\\w*|tennis\\w*|schaats\\w*|hockey\\w*|basketbal\\w*|handbal\\w*|volleybal\\w*|darts|atletiek|formule 1|grand prix|eredivisie|champions league|davis cup|bondscoach)\\b",

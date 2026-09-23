@@ -50,6 +50,7 @@ DEFAULT_CACHE_DIR = ROOT / ".cache" / "newsfeed"
 DEFAULT_EMBEDDING_CACHE = DEFAULT_CACHE_DIR / "embeddings.json"
 DEFAULT_METADATA_CACHE = DEFAULT_CACHE_DIR / "metadata.json"
 DEFAULT_PREVIOUS_FEED_CACHE = DEFAULT_CACHE_DIR / "previous-feed.xml"
+DEFAULT_REVIEW_CACHE = DEFAULT_CACHE_DIR / "gemini-reviews.json"
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_EMBEDDING_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
@@ -901,24 +902,60 @@ def decode_embedding(value: dict[str, Any], dimensions: int) -> np.ndarray:
     return vector.astype(np.float32) * scale
 
 
-def load_embedding_cache(path: Path, model: str, dimensions: int) -> dict[str, np.ndarray]:
+def load_embedding_cache_data(
+    path: Path, model: str, dimensions: int
+) -> tuple[dict[str, np.ndarray], set[str]]:
     if not path.exists():
-        return {}
+        return {}, set()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("model") != model or data.get("dimensions") != dimensions:
-            return {}
+            return {}, set()
         articles = data.get("articles")
         if not isinstance(articles, dict):
-            return {}
-        return {
+            return {}, set()
+        decoded = {
             str(article_id): decode_embedding(value, dimensions)
             for article_id, value in articles.items()
             if isinstance(value, dict)
         }
+        attempted_raw = data.get("attempted", [])
+        attempted = (
+            {str(value) for value in attempted_raw if isinstance(value, str)}
+            if isinstance(attempted_raw, list)
+            else set()
+        )
+        # Successful embeddings from older cache versions were necessarily attempted.
+        return decoded, attempted | set(decoded)
     except Exception as exc:
         logging.warning("Embedding-cache genegeerd: %s", exc)
-        return {}
+        return {}, set()
+
+
+def load_embedding_cache(path: Path, model: str, dimensions: int) -> dict[str, np.ndarray]:
+    return load_embedding_cache_data(path, model, dimensions)[0]
+
+
+def save_embedding_cache(
+    path: Path,
+    model: str,
+    dimensions: int,
+    article_by_id: dict[str, Article],
+    vectors: dict[str, np.ndarray],
+    attempted: set[str],
+) -> None:
+    cache_data = {
+        "version": 2,
+        "model": model,
+        "dimensions": dimensions,
+        "updated_at": utc_now().isoformat(),
+        "attempted": sorted(attempted),
+        "articles": {
+            embedding_cache_id(article_by_id[article_id]): encode_embedding(vector)
+            for article_id, vector in vectors.items()
+        },
+    }
+    write_atomic(path, json.dumps(cache_data, separators=(",", ":")) + "\n")
 
 
 def public_error(exc: Exception) -> str:
@@ -977,6 +1014,7 @@ def fetch_embedding_batch(
             "x-goog-api-key": api_key,
         },
         (10, 90),
+        attempts=1,
     )
     embeddings = response.json().get("embeddings")
     if not isinstance(embeddings, list) or len(embeddings) != len(articles):
@@ -1007,6 +1045,7 @@ def get_embeddings(
         "articles": len(articles),
         "cached": 0,
         "requested": 0,
+        "skipped_previously_attempted": 0,
         "available": 0,
         "remaining": len(articles),
     }
@@ -1015,38 +1054,46 @@ def get_embeddings(
     if not articles:
         return {}, {**base_status, "state": "no_articles"}
 
-    cached_by_key = load_embedding_cache(cache_path, model, dimensions)
+    cached_by_key, attempted = load_embedding_cache_data(cache_path, model, dimensions)
+    article_by_id = {article.article_id: article for article in articles}
+    current_keys = {embedding_cache_id(article) for article in articles}
+    attempted &= current_keys
     cached = {
         article.article_id: cached_by_key[embedding_cache_id(article)]
         for article in articles
         if embedding_cache_id(article) in cached_by_key
     }
     missing = [article for article in articles if article.article_id not in cached]
-    selected = missing[:max_new]
+    previously_attempted = [
+        article for article in missing if embedding_cache_id(article) in attempted
+    ]
+    eligible = [
+        article for article in missing if embedding_cache_id(article) not in attempted
+    ]
+    selected = eligible[:max_new]
     base_status["cached"] = len(cached)
     base_status["requested"] = len(selected)
+    base_status["skipped_previously_attempted"] = len(previously_attempted)
     combined = dict(cached)
-    article_by_id = {article.article_id: article for article in articles}
     failure: Exception | None = None
 
     for start in range(0, len(selected), batch_size):
         batch = selected[start : start + batch_size]
+        # Persist the one-shot marker before sending. A timeout or 429 must not
+        # make the same unchanged article leave the repository again next run.
+        attempted.update(embedding_cache_id(article) for article in batch)
+        save_embedding_cache(
+            cache_path, model, dimensions, article_by_id, combined, attempted
+        )
         try:
             vectors = fetch_embedding_batch(batch, api_key, model, dimensions)
             combined.update(
                 (article.article_id, vector)
                 for article, vector in zip(batch, vectors, strict=True)
             )
-            cache_data = {
-                "model": model,
-                "dimensions": dimensions,
-                "updated_at": utc_now().isoformat(),
-                "articles": {
-                    embedding_cache_id(article_by_id[article_id]): encode_embedding(vector)
-                    for article_id, vector in combined.items()
-                },
-            }
-            write_atomic(cache_path, json.dumps(cache_data, separators=(",", ":")) + "\n")
+            save_embedding_cache(
+                cache_path, model, dimensions, article_by_id, combined, attempted
+            )
         except Exception as exc:
             failure = exc
             logging.error("Embeddingbatch mislukt; hybride lokale fallback actief: %s", exc)
@@ -1064,8 +1111,10 @@ def get_embeddings(
                 "error": public_error(failure),
             }
         )
-    elif len(combined) < len(articles):
+    elif len(combined) < len(articles) and len(eligible) > len(selected):
         status["state"] = "warming_up_jaccard"
+    elif len(combined) < len(articles):
+        status["state"] = "one_shot_jaccard"
     else:
         status["state"] = "ok"
     return (combined or None), status
@@ -1212,41 +1261,148 @@ def extract_gemini_json(response_data: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Gemini gaf geen geldige JSON-respons") from exc
 
 
+def review_content_id(article: Article) -> str:
+    """Identify the exact public metadata version sent to Gemini Flash."""
+    # Some feeds omit a publication date, in which case the displayed timestamp
+    # can move between runs. It is not part of the content identity.
+    serialized = json.dumps(
+        {
+            "id": article.article_id,
+            "source": article.source,
+            "title": article.title,
+            "summary": article.summary[:MAX_GEMINI_SUMMARY_CHARS],
+            "url": article.link,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def load_review_cache(
+    path: Path | None, model: str
+) -> tuple[set[str], dict[str, dict[str, str]]]:
+    if path is None or not path.exists():
+        return set(), {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("model") != model:
+            return set(), {}
+        attempted_raw = data.get("attempted", [])
+        removed_raw = data.get("removed", {})
+        attempted = (
+            {str(value) for value in attempted_raw if isinstance(value, str)}
+            if isinstance(attempted_raw, list)
+            else set()
+        )
+        removed = (
+            {
+                str(key): {
+                    "article_id": str(value.get("article_id", "")),
+                    "duplicate_of": str(value.get("duplicate_of", "")),
+                }
+                for key, value in removed_raw.items()
+                if isinstance(key, str) and isinstance(value, dict)
+            }
+            if isinstance(removed_raw, dict)
+            else {}
+        )
+        return attempted, removed
+    except Exception as exc:
+        logging.warning("Gemini-reviewcache genegeerd: %s", exc)
+        return set(), {}
+
+
+def save_review_cache(
+    path: Path | None,
+    model: str,
+    attempted: set[str],
+    removed: dict[str, dict[str, str]],
+) -> None:
+    if path is None:
+        return
+    data = {
+        "version": 1,
+        "model": model,
+        "updated_at": utc_now().isoformat(),
+        # Only hashes and local article IDs are retained; no article text is cached here.
+        "attempted": sorted(attempted),
+        "removed": removed,
+    }
+    write_atomic(path, json.dumps(data, separators=(",", ":")) + "\n")
+
+
 def review_with_gemini(
     articles: list[Article],
     clusters: list[list[Article]],
     api_key: str | None,
     model: str,
+    cache_path: Path | None = None,
 ) -> tuple[list[Article], dict[str, Any]]:
+    content_id_by_article = {
+        article.article_id: review_content_id(article) for article in articles
+    }
+    current_content_ids = set(content_id_by_article.values())
+    attempted, removed_cache = load_review_cache(cache_path, model)
+    attempted &= current_content_ids
+    removed_cache = {
+        content_id: decision
+        for content_id, decision in removed_cache.items()
+        if content_id in current_content_ids
+    }
+    cached_remove_ids = {
+        decision["article_id"]
+        for content_id, decision in removed_cache.items()
+        if content_id_by_article.get(decision["article_id"]) == content_id
+    }
+    cached_articles = [
+        article for article in articles if article.article_id not in cached_remove_ids
+    ]
+
     if not clusters:
-        return articles, {"state": "no_candidates", "model": model, "removed": 0, "candidate_clusters": 0}
+        return cached_articles, {
+            "state": "no_candidates",
+            "model": model,
+            "removed": len(cached_remove_ids),
+            "removed_from_cache": len(cached_remove_ids),
+            "candidate_clusters": 0,
+        }
     if not api_key:
-        return articles, {
+        return cached_articles, {
             "state": "not_configured_exact_only",
             "model": model,
-            "removed": 0,
+            "removed": len(cached_remove_ids),
+            "removed_from_cache": len(cached_remove_ids),
             "candidate_clusters": len(clusters),
         }
 
     reviewable_clusters: list[list[Article]] = []
     skipped_articles = 0
+    skipped_previously_attempted = 0
     for cluster in clusters:
-        reviewable = [
-            article
-            for article in cluster
-            if len(article.summary.strip()) >= MIN_AI_SUMMARY_CHARS
+        eligible = [
+            article for article in cluster if article.article_id not in cached_remove_ids
         ]
-        skipped_articles += len(cluster) - len(reviewable)
+        reviewable = []
+        for article in eligible:
+            if len(article.summary.strip()) < MIN_AI_SUMMARY_CHARS:
+                skipped_articles += 1
+            elif content_id_by_article[article.article_id] in attempted:
+                skipped_previously_attempted += 1
+            else:
+                reviewable.append(article)
         if len(reviewable) >= 2:
             reviewable_clusters.append(reviewable)
     if not reviewable_clusters:
-        return articles, {
+        return cached_articles, {
             "state": "no_reviewable_candidates",
             "model": model,
-            "removed": 0,
+            "removed": len(cached_remove_ids),
+            "removed_from_cache": len(cached_remove_ids),
             "candidate_clusters": 0,
             "candidate_clusters_detected": len(clusters),
             "articles_skipped_insufficient_summary": skipped_articles,
+            "articles_skipped_previously_attempted": skipped_previously_attempted,
         }
 
     cluster_by_id: dict[str, set[str]] = {}
@@ -1255,6 +1411,16 @@ def review_with_gemini(
         ids = {article.article_id for article in cluster}
         for article_id in ids:
             cluster_by_id[article_id] = ids
+
+    sent_content_ids = {
+        content_id_by_article[article.article_id]
+        for cluster in reviewable_clusters
+        for article in cluster
+    }
+    # Record the attempt before sending so even a timeout cannot cause the same
+    # unchanged article metadata to be sent again on the next scheduled run.
+    attempted.update(sent_content_ids)
+    save_review_cache(cache_path, model, attempted, removed_cache)
 
     try:
         endpoint = GEMINI_ENDPOINT.format(model=model)
@@ -1268,6 +1434,7 @@ def review_with_gemini(
                 "x-goog-api-key": api_key,
             },
             (10, 90),
+            attempts=1,
         )
         result = extract_gemini_json(response.json())
         decisions = result.get("remove")
@@ -1298,24 +1465,42 @@ def review_with_gemini(
             if ids and ids <= remove_ids:
                 raise ValueError("Gemini wilde een volledig cluster verwijderen")
 
-        reviewed = [article for article in articles if article.article_id not in remove_ids]
+        for article_id in remove_ids:
+            removed_cache[content_id_by_article[article_id]] = {
+                "article_id": article_id,
+                "duplicate_of": next(
+                    str(decision.get("duplicate_of", ""))
+                    for decision in decisions
+                    if isinstance(decision, dict) and str(decision.get("id", "")) == article_id
+                ),
+            }
+        save_review_cache(cache_path, model, attempted, removed_cache)
+        all_remove_ids = cached_remove_ids | remove_ids
+        reviewed = [
+            article for article in articles if article.article_id not in all_remove_ids
+        ]
         return reviewed, {
             "state": "ok",
             "model": model,
-            "removed": len(remove_ids),
+            "removed": len(all_remove_ids),
+            "removed_new": len(remove_ids),
+            "removed_from_cache": len(cached_remove_ids),
             "candidate_clusters": len(reviewable_clusters),
             "candidate_clusters_detected": len(clusters),
             "articles_skipped_insufficient_summary": skipped_articles,
+            "articles_skipped_previously_attempted": skipped_previously_attempted,
         }
     except Exception as exc:
         logging.error("Gemini-beoordeling mislukt; fail-safe exact-only actief: %s", exc)
-        return articles, {
+        return cached_articles, {
             "state": "failed_exact_only",
             "model": model,
-            "removed": 0,
+            "removed": len(cached_remove_ids),
+            "removed_from_cache": len(cached_remove_ids),
             "candidate_clusters": len(reviewable_clusters),
             "candidate_clusters_detected": len(clusters),
             "articles_skipped_insufficient_summary": skipped_articles,
+            "articles_skipped_previously_attempted": skipped_previously_attempted,
             "error": public_error(exc),
         }
 
@@ -1366,7 +1551,7 @@ def display_ai_state(state: str) -> str:
     labels = {
         "ok": "Gemini-beoordeling geslaagd",
         "no_candidates": "Geen kandidaatclusters",
-        "no_reviewable_candidates": "Geen clusters met voldoende samenvatting",
+        "no_reviewable_candidates": "Geen nieuwe clusters om te beoordelen",
         "not_configured_exact_only": "Alleen exacte deduplicatie (API-sleutel ontbreekt)",
         "failed_exact_only": "Alleen exacte deduplicatie (Gemini faalde)",
     }
@@ -1379,6 +1564,7 @@ def display_embedding_state(state: str) -> str:
         "no_articles": "Geen artikelen om te embedden",
         "not_configured_jaccard": "Lokale voorselectie (API-sleutel ontbreekt)",
         "warming_up_jaccard": "Semantische cache wordt geleidelijk opgebouwd",
+        "one_shot_jaccard": "Lokale fallback na eenmalige embeddingpoging",
         "failed_partial_jaccard": "Gedeeltelijke embeddings met lokale fallback",
         "failed_jaccard": "Lokale voorselectie (embeddings faalden)",
     }
@@ -1411,6 +1597,7 @@ def render_status_page(status: dict[str, Any]) -> str:
         in {
             "not_configured_jaccard",
             "warming_up_jaccard",
+            "one_shot_jaccard",
             "failed_partial_jaccard",
             "failed_jaccard",
         }
@@ -1459,7 +1646,7 @@ def render_status_page(status: dict[str, Any]) -> str:
   <p><a href="feed.xml">Open RSS-feed</a> · <a href="status.json">Bekijk ruwe status</a></p>
   <section class="cards">
     <div class="card"><span class="number">{status["articles_published"]}</span>{article_window_label}</div>
-    <div class="card"><span class="number">{status["articles_excluded_by_filter"]}</span>sportartikelen uitgesloten</div>
+    <div class="card"><span class="number">{status["articles_excluded_by_filter"]}</span>artikelen uitgesloten door filters</div>
     <div class="card"><span class="number">{status["exact_duplicates_removed"]}</span>exacte dubbelen verwijderd</div>
     <div class="card"><strong>Paginametadata</strong><br>
       <span class="muted">{status["metadata"]["enriched"]} nieuw verrijkt, {status["metadata"]["cached"]} uit cache</span></div>
@@ -1571,7 +1758,7 @@ def build(config_path: Path, public_dir: Path) -> dict[str, Any]:
         embedding_similarity_threshold,
     )
     final_articles, gemini_status = review_with_gemini(
-        exact_unique, clusters, api_key, model
+        exact_unique, clusters, api_key, model, DEFAULT_REVIEW_CACHE
     )
     final_articles = [
         article

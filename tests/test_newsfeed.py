@@ -63,6 +63,29 @@ class NewsfeedTests(unittest.TestCase):
             )
         )
 
+    def test_gossip_url_path_is_excluded_without_title_filtering(self) -> None:
+        rules = ExclusionRules(
+            url_path_segments=frozenset({"show", "entertainment", "achterklap"}),
+            category_terms=frozenset(),
+            title_patterns=(),
+        )
+        self.assertTrue(
+            is_excluded_article(
+                "Bekende Nederlander geeft interview",
+                "https://www.ad.nl/show/interview~a123/",
+                (),
+                rules,
+            )
+        )
+        self.assertFalse(
+            is_excluded_article(
+                "Onderzoek toont nieuwe resultaten",
+                "https://example.com/wetenschap/showcase-onderzoek",
+                (),
+                rules,
+            )
+        )
+
     def test_sport_category_is_excluded(self) -> None:
         self.assertTrue(
             is_excluded_article(
@@ -258,7 +281,7 @@ class NewsfeedTests(unittest.TestCase):
         self.assertEqual(status["state"], "not_configured_jaccard")
 
     @patch("newsfeed.fetch_embedding_batch", side_effect=RuntimeError("quota bereikt"))
-    def test_embedding_failure_does_not_leave_partial_cache(self, _fetch: Mock) -> None:
+    def test_embedding_failure_is_not_sent_again(self, fetch: Mock) -> None:
         with TemporaryDirectory() as directory:
             cache_path = Path(directory) / "embeddings.json"
             embeddings, status = get_embeddings(
@@ -270,9 +293,39 @@ class NewsfeedTests(unittest.TestCase):
                 40,
                 cache_path=cache_path,
             )
-            self.assertFalse(cache_path.exists())
+            embeddings_again, second_status = get_embeddings(
+                [article("a", "Titel", "https://a.example/1", "Samenvatting")],
+                "secret",
+                "gemini-embedding-2",
+                3,
+                50,
+                40,
+                cache_path=cache_path,
+            )
+            self.assertTrue(cache_path.exists())
         self.assertIsNone(embeddings)
+        self.assertIsNone(embeddings_again)
         self.assertEqual(status["state"], "failed_jaccard")
+        self.assertEqual(second_status["state"], "one_shot_jaccard")
+        self.assertEqual(second_status["skipped_previously_attempted"], 1)
+        self.assertEqual(fetch.call_count, 1)
+
+    @patch("newsfeed.fetch_embedding_batch")
+    def test_successful_embedding_is_sent_once(self, fetch: Mock) -> None:
+        fetch.return_value = [np.array([1.0, 0.0, 0.0], dtype=np.float32)]
+        item = article("a", "Titel", "https://a.example/1", "Samenvatting")
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "embeddings.json"
+            first, _ = get_embeddings(
+                [item], "secret", "gemini-embedding-2", 3, 50, 40, cache_path
+            )
+            second, status = get_embeddings(
+                [item], "secret", "gemini-embedding-2", 3, 50, 40, cache_path
+            )
+        self.assertEqual(set(first or {}), {"a"})
+        self.assertEqual(set(second or {}), {"a"})
+        self.assertEqual(status["cached"], 1)
+        self.assertEqual(fetch.call_count, 1)
 
     @patch("newsfeed.fetch_embedding_batch")
     def test_successful_embedding_batch_is_kept_if_next_batch_fails(self, fetch: Mock) -> None:
@@ -370,6 +423,85 @@ class NewsfeedTests(unittest.TestCase):
         self.assertEqual(status["state"], "ok")
         self.assertNotIn("params", post.call_args.kwargs)
         self.assertEqual(post.call_args.kwargs["headers"]["x-goog-api-key"], "secret")
+
+    @patch("newsfeed.requests.post")
+    def test_gemini_review_is_reused_without_resending_articles(self, post: Mock) -> None:
+        items = [
+            article(
+                "a",
+                "Gebeurtenis met alle feiten",
+                "https://a.example/1",
+                "Deze samenvatting bevat alle relevante feiten voor een goede vergelijking.",
+            ),
+            article(
+                "b",
+                "Gebeurtenis redundant gemeld",
+                "https://b.example/2",
+                "Deze samenvatting herhaalt dezelfde feiten en voegt inhoudelijk niets toe.",
+            ),
+        ]
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "text": '{"remove":[{"id":"b","duplicate_of":"a","reason":"redundant"}]}'
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        post.return_value = response
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "reviews.json"
+            first, _ = review_with_gemini(
+                items, [items], "secret", "gemini-test", cache_path
+            )
+            # Feeds without a real timestamp may receive a moving fallback date;
+            # that alone must not cause the article text to be sent again.
+            for item in items:
+                item.published += timedelta(minutes=30)
+            second, status = review_with_gemini(
+                items, [items], "secret", "gemini-test", cache_path
+            )
+        self.assertEqual([item.article_id for item in first], ["a"])
+        self.assertEqual([item.article_id for item in second], ["a"])
+        self.assertEqual(status["removed_from_cache"], 1)
+        self.assertEqual(post.call_count, 1)
+
+    @patch("newsfeed.requests.post", side_effect=RuntimeError("tijdelijke fout"))
+    def test_failed_gemini_review_is_not_sent_again(self, post: Mock) -> None:
+        items = [
+            article(
+                "a",
+                "Gebeurtenis uitgebreid gemeld",
+                "https://a.example/1",
+                "Deze samenvatting bevat voldoende feiten voor een inhoudelijke vergelijking.",
+            ),
+            article(
+                "b",
+                "Gebeurtenis ook gemeld",
+                "https://b.example/2",
+                "Deze samenvatting bevat eveneens voldoende feiten voor de vergelijking.",
+            ),
+        ]
+        with TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "reviews.json"
+            first, first_status = review_with_gemini(
+                items, [items], "secret", "gemini-test", cache_path
+            )
+            second, second_status = review_with_gemini(
+                items, [items], "secret", "gemini-test", cache_path
+            )
+        self.assertEqual(first, items)
+        self.assertEqual(second, items)
+        self.assertEqual(first_status["state"], "failed_exact_only")
+        self.assertEqual(second_status["state"], "no_reviewable_candidates")
+        self.assertEqual(post.call_count, 1)
 
     @patch("newsfeed.requests.post")
     def test_invalid_gemini_decision_keeps_every_candidate(self, post: Mock) -> None:

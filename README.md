@@ -13,8 +13,9 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 
 1. GitHub Actions start elke 30 minuten.
 2. `newsfeed.py` haalt RSS-feeds en beperkte openbare nieuwsbriefarchiefmetadata op.
-3. Sportartikelen worden verwijderd op basis van de RSS-categorie, het URL-pad en
-   een beperkte titelcontrole. De regels staan in `config/sources.json`.
+3. Sport- en gossipartikelen worden verwijderd op basis van de RSS-categorie en
+   het URL-pad; voor sport geldt daarnaast een beperkte titelcontrole. De regels
+   staan in `config/sources.json`.
 4. De aggregator voegt nieuwe items samen met 72 uur historie uit een private
    GitHub Actions-cache. Langzamere nieuwsbriefbronnen kunnen een eigen, ruimer
    venster krijgen zodat de nieuwste editie zichtbaar blijft.
@@ -24,10 +25,13 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
    begrensd deel van de publieke artikelpagina om uitsluitend de OpenGraph- of
    meta-description op te halen. De artikeltekst wordt niet verwerkt.
 7. Gemini Embedding 2 maakt van de overgebleven RSS-metadata semantische
-   kandidaatclusters. Eerder berekende vectors worden privé gecachet; bij een
-   API-fout neemt de lokale tekstvergelijking het automatisch over.
+   kandidaatclusters. Iedere ongewijzigde inhoudsversie wordt hiervoor maximaal
+   eenmaal aangeboden. De vectors worden privé gecachet; bij een API-fout neemt
+   de lokale tekstvergelijking het automatisch over.
 8. Alleen de titel, RSS-samenvatting/paginametadata en RSS-metadata van die
-   clusters gaan naar Gemini Flash voor de uiteindelijke behoudsbeslissing.
+   clusters gaan naar Gemini Flash voor de uiteindelijke behoudsbeslissing. Een
+   ongewijzigde inhoudsversie wordt ook daar maximaal eenmaal aangeboden; eerdere
+   geldige beslissingen worden uit de private cache hergebruikt.
 9. De workflow publiceert `public/feed.xml`, `public/index.html` en
    `public/status.json` rechtstreeks via GitHub Pages.
 
@@ -39,10 +43,10 @@ toon of framing zonder extra informatie is geen zelfstandig behoudsargument.
 ### Fail-safe
 
 Als de API-sleutel ontbreekt, Gemini niet bereikbaar is, het gratis quotum op is
-of de respons ongeldig is,
-wordt geen enkel mogelijk inhoudelijk duplicaat verwijderd. Alleen de voorafgaande
-exacte deduplicatie blijft dan actief. Een bronstoring blokkeert de overige bronnen
-niet; nog geldige items uit de vorige feed blijven binnen hun bronvenster beschikbaar.
+of de respons ongeldig is, wordt geen nieuw mogelijk inhoudelijk duplicaat
+verwijderd. Alleen exacte deduplicatie en eerder geldig gecachete beslissingen
+blijven actief. Een bronstoring blokkeert de overige bronnen niet; nog geldige items
+uit de vorige feed blijven binnen hun bronvenster beschikbaar.
 
 ## Eenmalige configuratie op GitHub
 
@@ -109,8 +113,8 @@ Ondersteunde environment variables:
 - `public/index.html`: leesbare statuspagina.
 - `public/status.json`: machineleesbare bron- en runstatus.
 - `.cache/newsfeed`: private, kortlevende Actions-cache voor historie,
-  paginametadata en gekwantiseerde embeddings; deze map wordt niet gepubliceerd
-  of gecommit.
+  paginametadata, gekwantiseerde embeddings en alleen hashes/ID's van
+  Gemini-beoordelingen; deze map wordt niet gepubliceerd of gecommit.
 
 De software haalt geen volledige (betaalde) artikelen op en stuurt die dus ook
 niet naar Gemini. Metadata-ophaling accepteert alleen HTTPS, vooraf toegestane
