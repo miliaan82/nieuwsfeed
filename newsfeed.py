@@ -1628,6 +1628,15 @@ def main() -> int:
     except Exception:
         logging.exception("Nieuwsfeed kon niet worden gegenereerd")
         return 1
+    for source in status["sources"]:
+        logging.info(
+            "Bron %s: ok=%s, opgehaald=%d, geaccepteerd=%d, uitgesloten=%d",
+            source["name"],
+            source["ok"],
+            source["fetched_items"],
+            source["accepted_items"],
+            source["excluded_items"],
+        )
     logging.info(
         "Klaar: %d artikelen, %d bronnen geslaagd, Gemini=%s",
         status["articles_published"],
