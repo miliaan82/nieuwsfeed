@@ -118,10 +118,11 @@
       "enabled": true
     },
     {
-      "name": "Last Week in AI",
-      "url": "https://lastweekin.ai/feed",
-      "article_domains": ["lastweekin.ai", "substack.com"],
-      "language": "en",
+      "name": "AI Report",
+      "url": "https://www.aireport.nl/archive",
+      "type": "beehiiv_archive",
+      "article_domains": ["aireport.nl"],
+      "language": "nl",
       "history_hours": 240,
       "enabled": true
     }

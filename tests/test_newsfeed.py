@@ -23,6 +23,7 @@ from newsfeed import (
     get_embeddings,
     hostname_is_public,
     is_excluded_article,
+    parse_beehiiv_archive_articles,
     render_feed,
     review_with_gemini,
     safe_metadata_url,
@@ -117,6 +118,46 @@ class NewsfeedTests(unittest.TestCase):
         self.assertEqual(cutoffs["Dagelijks"], NOW - timedelta(hours=72))
         self.assertEqual(cutoffs["Wekelijks"], NOW - timedelta(hours=240))
         self.assertEqual(overrides, {"Wekelijks": 240})
+
+    def test_beehiiv_archive_uses_only_public_card_metadata(self) -> None:
+        raw = b"""
+        <html><body>
+          <a href="/p/nieuw-bericht">
+            <div>
+              <h2>Nieuw AI-bericht met nuance</h2>
+              <p>Openbare korte uitleg uit het archief.</p>
+              <time datetime="2026-09-21T08:30:00Z">Sep 21, 2026</time>
+              <span>12 min read</span>
+            </div>
+          </a>
+        </body></html>
+        """
+        source = {
+            "name": "AI Report",
+            "url": "https://www.aireport.nl/archive",
+            "article_domains": ["aireport.nl"],
+        }
+        articles, fetched, excluded = parse_beehiiv_archive_articles(
+            raw,
+            source,
+            NOW,
+            NOW - timedelta(hours=240),
+            self.sport_rules,
+        )
+        self.assertEqual(fetched, 1)
+        self.assertEqual(excluded, 0)
+        self.assertEqual(len(articles), 1)
+        self.assertEqual(articles[0].title, "Nieuw AI-bericht met nuance")
+        self.assertEqual(
+            articles[0].summary, "Openbare korte uitleg uit het archief."
+        )
+        self.assertEqual(
+            articles[0].link, "https://www.aireport.nl/p/nieuw-bericht"
+        )
+        self.assertEqual(
+            articles[0].published,
+            datetime(2026, 9, 21, 8, 30, tzinfo=timezone.utc),
+        )
 
     @patch("newsfeed.hostname_is_public", return_value=True)
     def test_metadata_url_requires_https_and_allowlisted_domain(self, _public: Mock) -> None:

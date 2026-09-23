@@ -1,6 +1,6 @@
 # Persoonlijke AI-nieuwsfeed
 
-Deze repository combineert geselecteerde RSS-bronnen tot één persoonlijke RSS-feed. De pipeline
+Deze repository combineert geselecteerde nieuwsbronnen tot één persoonlijke RSS-feed. De pipeline
 verwijdert eerst exacte dubbelen, maakt daarna lokaal goedkope kandidaatclusters
 en stuurt uitsluitend die clusters naar Gemini. Artikelen over dezelfde gebeurtenis
 blijven staan wanneer ze aantoonbaar extra informatiewaarde hebben.
@@ -12,7 +12,7 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 ## Werking
 
 1. GitHub Actions start elke 30 minuten.
-2. `newsfeed.py` haalt de RSS-feeds op.
+2. `newsfeed.py` haalt RSS-feeds en beperkte openbare nieuwsbriefarchiefmetadata op.
 3. Sportartikelen worden verwijderd op basis van de RSS-categorie, het URL-pad en
    een beperkte titelcontrole. De regels staan in `config/sources.json`.
 4. De aggregator voegt nieuwe items samen met 72 uur historie uit een private

@@ -126,6 +126,78 @@ class MetadataExtractor(HTMLParser):
         return ""
 
 
+ARCHIVE_DATE_PATTERN = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\b"
+)
+
+
+class BeehiivArchiveParser(HTMLParser):
+    """Extract only public post-card metadata from a Beehiiv archive page."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.entries: list[dict[str, Any]] = []
+        self._current: dict[str, Any] | None = None
+        self._heading_depth = 0
+        self._time_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.casefold(): value or "" for key, value in attrs}
+        normalized_tag = tag.casefold()
+        if self._current is None:
+            if normalized_tag != "a":
+                return
+            href = canonicalize_url(urljoin(self.base_url, values.get("href", "")))
+            if not href or not urlsplit(href).path.startswith("/p/"):
+                return
+            self._current = {
+                "link": href,
+                "parts": [],
+                "heading_parts": [],
+                "summary_parts": [],
+                "date_parts": [],
+                "datetime": "",
+            }
+            return
+
+        if normalized_tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            self._heading_depth += 1
+        elif normalized_tag == "time":
+            self._time_depth += 1
+            if values.get("datetime"):
+                self._current["datetime"] = values["datetime"]
+
+    def handle_data(self, data: str) -> None:
+        if self._current is None:
+            return
+        value = clean_text(data)
+        if not value:
+            return
+        self._current["parts"].append(value)
+        if self._heading_depth:
+            self._current["heading_parts"].append(value)
+        elif self._time_depth:
+            self._current["date_parts"].append(value)
+        else:
+            self._current["summary_parts"].append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._current is None:
+            return
+        normalized_tag = tag.casefold()
+        if normalized_tag in {"h1", "h2", "h3", "h4", "h5", "h6"} and self._heading_depth:
+            self._heading_depth -= 1
+        elif normalized_tag == "time" and self._time_depth:
+            self._time_depth -= 1
+
+        if normalized_tag == "a":
+            self.entries.append(self._current)
+            self._current = None
+            self._heading_depth = 0
+            self._time_depth = 0
+
+
 @dataclass(slots=True)
 class Article:
     article_id: str
@@ -319,6 +391,104 @@ def create_session() -> requests.Session:
     return session
 
 
+
+def parse_archive_published(entry: dict[str, Any]) -> datetime | None:
+    candidates = [
+        clean_text(entry.get("datetime")),
+        clean_text(" ".join(entry.get("date_parts", []))),
+        clean_text(" ".join(entry.get("parts", []))),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return ensure_utc(datetime.fromisoformat(candidate.replace("Z", "+00:00")))
+        except ValueError:
+            match = ARCHIVE_DATE_PATTERN.search(candidate)
+            if match:
+                return datetime.strptime(match.group(0), "%b %d, %Y").replace(
+                    tzinfo=timezone.utc
+                )
+    return None
+
+
+def parse_beehiiv_archive_articles(
+    raw: bytes,
+    source: dict[str, Any],
+    now: datetime,
+    cutoff: datetime,
+    rules: ExclusionRules,
+) -> tuple[list[Article], int, int]:
+    name = str(source["name"])
+    url = str(source["url"])
+    allowed_domains = tuple(source.get("article_domains", ()))
+    parser = BeehiivArchiveParser(url)
+    parser.feed(raw.decode("utf-8", errors="replace"))
+
+    articles: list[Article] = []
+    excluded_items = 0
+    seen_links: set[str] = set()
+    for entry in parser.entries:
+        link = canonicalize_url(str(entry.get("link", "")))
+        if not link or link in seen_links:
+            continue
+        seen_links.add(link)
+        hostname = urlsplit(link).hostname or ""
+        if not hostname_allowed(hostname, allowed_domains):
+            continue
+
+        title = clean_text(" ".join(entry.get("heading_parts", [])), 500)
+        if not title:
+            for part in entry.get("parts", []):
+                candidate = clean_text(part, 500)
+                if (
+                    len(candidate) >= 10
+                    and not ARCHIVE_DATE_PATTERN.search(candidate)
+                    and not re.search(r"\bmin(?:ute)?s?\s+read\b", candidate, re.IGNORECASE)
+                ):
+                    title = candidate
+                    break
+
+        published = parse_archive_published(entry)
+        if not title or published is None:
+            continue
+        if published > now + timedelta(hours=2):
+            published = now
+
+        summary_parts = []
+        for part in entry.get("summary_parts", []):
+            candidate = clean_text(part)
+            if (
+                candidate
+                and candidate != title
+                and not ARCHIVE_DATE_PATTERN.search(candidate)
+                and not re.fullmatch(
+                    r"\d+\s+min(?:ute)?s?\s+read", candidate, re.IGNORECASE
+                )
+            ):
+                summary_parts.append(candidate)
+        summary = clean_text(" ".join(summary_parts))
+        if is_excluded_article(title, link, (), rules):
+            excluded_items += 1
+            continue
+        if published < cutoff:
+            continue
+
+        articles.append(
+            Article(
+                article_id=stable_article_id(link, name, link, title),
+                title=title,
+                link=link,
+                summary=summary,
+                source=name,
+                source_url=url,
+                published=published,
+                fetched_at=now,
+            )
+        )
+    return articles, len(seen_links), excluded_items
+
+
 def fetch_source(
     session: requests.Session,
     source: dict[str, Any],
@@ -335,6 +505,29 @@ def fetch_source(
         raw = response.raw.read(MAX_FEED_BYTES + 1, decode_content=True)
         if len(raw) > MAX_FEED_BYTES:
             raise ValueError(f"feed is groter dan {MAX_FEED_BYTES} bytes")
+
+        source_type = str(source.get("type", "rss"))
+        if source_type == "beehiiv_archive":
+            content_type = response.headers.get("Content-Type", "").casefold()
+            if content_type and "html" not in content_type:
+                raise ValueError("archiefbron leverde geen HTML")
+            articles, fetched_items, excluded_items = parse_beehiiv_archive_articles(
+                raw, source, now, cutoff, rules
+            )
+            if fetched_items == 0:
+                raise ValueError("archief bevat geen herkenbare openbare berichten")
+            return articles, SourceStatus(
+                name=name,
+                url=url,
+                ok=True,
+                fetched_items=fetched_items,
+                accepted_items=len(articles),
+                excluded_items=excluded_items,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+        if source_type != "rss":
+            raise ValueError(f"onbekend brontype: {source_type}")
+
         parsed = feedparser.parse(raw)
         if parsed.bozo and not parsed.entries:
             raise ValueError(f"ongeldige feed: {parsed.bozo_exception}")
