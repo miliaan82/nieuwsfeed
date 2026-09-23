@@ -1,6 +1,6 @@
 # Persoonlijke AI-nieuwsfeed
 
-Deze repository combineert tien RSS-bronnen tot één feed voor Feedly. De pipeline
+Deze repository combineert tien RSS-bronnen tot één persoonlijke RSS-feed. De pipeline
 verwijdert eerst exacte dubbelen, maakt daarna lokaal goedkope kandidaatclusters
 en stuurt uitsluitend die clusters naar Gemini. Artikelen over dezelfde gebeurtenis
 blijven staan wanneer ze aantoonbaar extra informatiewaarde hebben.
@@ -51,14 +51,15 @@ niet; nog geldige items uit de vorige feed blijven maximaal 72 uur beschikbaar.
 3. Maak het secret `GEMINI_API_KEY` met de sleutel uit dat gratis project.
 4. Open **Settings → Pages** en kies bij **Source** voor **GitHub Actions**.
 5. Open **Actions → Update news feed → Run workflow** voor de eerste handmatige run.
-6. Voeg daarna de bovenstaande `feed.xml`-URL toe in Feedly.
+6. Voeg daarna de bovenstaande `feed.xml`-URL toe aan je RSS-reader.
 
 Het standaardmodel is `gemini-3.8-flash`. Een ander model kan zonder codewijziging
 worden ingesteld als Actions-variable `GEMINI_MODEL`.
 
-De feed wordt om minuut 7 en 37 van ieder uur opnieuw gebouwd. Feedly bepaalt zelf
-wanneer het de feed opnieuw ophaalt; daardoor kan een nieuw artikel daar later
-verschijnen dan op de statuspagina. De RSS-feed bevat een TTL-hint van 30 minuten.
+De feed wordt om minuut 7 en 37 van ieder uur opnieuw gebouwd. Een RSS-reader
+bepaalt zelf wanneer hij de feed opnieuw ophaalt; daardoor kan een nieuw artikel
+daar later verschijnen dan op de statuspagina. De feed bevat een TTL-hint van
+30 minuten.
 
 ## Lokale uitvoering
 
@@ -103,7 +104,7 @@ Ondersteunde environment variables:
 
 ## Uitvoer en privacy
 
-- `public/feed.xml`: de Feedly-feed.
+- `public/feed.xml`: de RSS-feed.
 - `public/index.html`: leesbare statuspagina.
 - `public/status.json`: machineleesbare bron- en runstatus.
 - `.cache/newsfeed`: private, kortlevende Actions-cache voor historie,
