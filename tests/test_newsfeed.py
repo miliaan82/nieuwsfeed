@@ -15,6 +15,7 @@ from newsfeed import (
     candidate_clusters,
     canonicalize_url,
     decode_embedding,
+    enrich_missing_summaries,
     encode_embedding,
     exact_deduplicate,
     fetch_embedding_batch,
@@ -24,6 +25,7 @@ from newsfeed import (
     hostname_is_public,
     is_excluded_article,
     parse_beehiiv_archive_articles,
+    parse_teletekst_index_articles,
     render_feed,
     review_with_gemini,
     safe_metadata_url,
@@ -181,6 +183,57 @@ class NewsfeedTests(unittest.TestCase):
             articles[0].published,
             datetime(2026, 9, 21, 8, 30, tzinfo=timezone.utc),
         )
+
+    def test_teletekst_index_uses_news_pages_and_excludes_sport(self) -> None:
+        raw = b"""
+        <html><body><pre id="content">
+        <span class="yellow"> Kamer:stop ledenwerving omroepen... <a href="/webtekst?p=104">104</a></span>
+        <span class="yellow"> Sabotage vermoed bij brand Polen... <a href="/webtekst?p=125">125</a></span>
+        <span class="cyan"> Gelijkspel Oranje tegen Duitsland.. <a href="/webtekst?p=810">810</a></span>
+        </pre></body></html>
+        """
+        source = {
+            "name": "NOS Teletekst",
+            "url": "https://teletekst-data.nos.nl/webtekst?p=101",
+            "source_url": "https://nos.nl/teletekst/101",
+            "article_url_template": "https://nos.nl/teletekst/{page}",
+            "minimum_page": 104,
+            "maximum_page": 199,
+        }
+        articles, fetched, excluded = parse_teletekst_index_articles(
+            [raw], source, NOW, self.sport_rules
+        )
+        self.assertEqual(fetched, 2)
+        self.assertEqual(excluded, 0)
+        self.assertEqual(
+            [item.title for item in articles],
+            ["Kamer:stop ledenwerving omroepen", "Sabotage vermoed bij brand Polen"],
+        )
+        self.assertEqual(articles[0].link, "https://nos.nl/teletekst/104")
+        self.assertEqual(articles[0].summary, "")
+
+    @patch("newsfeed.fetch_metadata_description")
+    def test_teletekst_does_not_fetch_detail_metadata(self, fetch: Mock) -> None:
+        item = article(
+            "tt-104",
+            "Kamer:stop ledenwerving omroepen",
+            "https://nos.nl/teletekst/104",
+            "",
+            "NOS Teletekst",
+        )
+        sources = [
+            {
+                "name": "NOS Teletekst",
+                "article_domains": ["nos.nl"],
+                "metadata_enrichment": False,
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            status = enrich_missing_summaries(
+                [item], sources, 80, 30, Path(directory) / "metadata.json"
+            )
+        self.assertEqual(status["disabled_by_source"], 1)
+        fetch.assert_not_called()
 
     @patch("newsfeed.hostname_is_public", return_value=True)
     def test_metadata_url_requires_https_and_allowlisted_domain(self, _public: Mock) -> None:

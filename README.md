@@ -12,7 +12,8 @@ De gepubliceerde feed komt na het activeren van GitHub Pages beschikbaar op:
 ## Werking
 
 1. GitHub Actions start elke 30 minuten.
-2. `newsfeed.py` haalt RSS-feeds en beperkte openbare nieuwsbriefarchiefmetadata op.
+2. `newsfeed.py` haalt RSS-feeds, openbare nieuwsbriefarchiefmetadata en de
+   officiële NOS Teletekst-nieuwsindex op.
 3. Sport- en gossipartikelen worden verwijderd op basis van de RSS-categorie en
    het URL-pad; voor sport geldt daarnaast een beperkte titelcontrole. De regels
    staan in `config/sources.json`.
@@ -128,6 +129,10 @@ Het repositorysecret wordt alleen als HTTP-header aan Google aangeboden. De
 publieke feed en status bevatten geen API-sleutel, persoonlijke leesgeschiedenis
 of klikgedrag. Ze bevatten wel bewust openbare nieuwsmetadata en de GitHub-
 gebruikersnaam die al in de openbare Pages-URL staat.
+
+Voor NOS Teletekst worden alleen koppen en paginalinks uit pagina's 101–103
+verwerkt. Sportpagina's en de tekst van de detailpagina's worden niet opgehaald;
+Teletekst-items krijgen daardoor geen inhoudelijke Flash-beoordeling.
 
 Bij een nieuw gratis project kan de embeddingcache zich over meerdere runs vullen
 door `EMBEDDING_MAX_NEW_PER_RUN`. Een HTTP 429 betekent dat het gratis quotum of

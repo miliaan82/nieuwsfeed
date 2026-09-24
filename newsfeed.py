@@ -199,6 +199,58 @@ class BeehiivArchiveParser(HTMLParser):
             self._time_depth = 0
 
 
+class TeletekstIndexParser(HTMLParser):
+    """Extract headline/page pairs from the official NOS Teletekst index."""
+
+    MARKER = "[[TT-PAGE:{page}]]"
+
+    def __init__(self, minimum_page: int, maximum_page: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.minimum_page = minimum_page
+        self.maximum_page = maximum_page
+        self._in_content = False
+        self._link_page: int | None = None
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.casefold(): value or "" for key, value in attrs}
+        normalized_tag = tag.casefold()
+        if normalized_tag == "pre" and values.get("id") == "content":
+            self._in_content = True
+            return
+        if not self._in_content or normalized_tag != "a":
+            return
+        match = re.search(r"(?:^|[?&])p=(\d{3})(?:-\d+)?(?:&|$)", values.get("href", ""))
+        self._link_page = int(match.group(1)) if match else None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_content:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.casefold()
+        if normalized_tag == "a" and self._in_content and self._link_page is not None:
+            self._parts.append(self.MARKER.format(page=self._link_page))
+            self._link_page = None
+        elif normalized_tag == "pre":
+            self._in_content = False
+
+    def headlines(self) -> dict[int, str]:
+        headlines: dict[int, str] = {}
+        marker_pattern = re.compile(r"\[\[TT-PAGE:(\d{3})\]\]")
+        for line in "".join(self._parts).splitlines():
+            for marker in marker_pattern.finditer(line):
+                page = int(marker.group(1))
+                if not self.minimum_page <= page <= self.maximum_page:
+                    continue
+                prefix = line[: marker.start()].rsplit("]]", 1)[-1]
+                title = re.sub(rf"\s*{page}\s*$", "", prefix)
+                title = re.sub(r"\.{2,}$", "", clean_text(title, 500)).strip()
+                if len(title) >= 10:
+                    headlines[page] = title
+        return headlines
+
+
 @dataclass(slots=True)
 class Article:
     article_id: str
@@ -490,6 +542,57 @@ def parse_beehiiv_archive_articles(
     return articles, len(seen_links), excluded_items
 
 
+def parse_teletekst_index_articles(
+    raw_pages: Iterable[bytes],
+    source: dict[str, Any],
+    now: datetime,
+    rules: ExclusionRules,
+) -> tuple[list[Article], int, int]:
+    """Turn only NOS Teletekst index headlines into feed items.
+
+    Detail-page bodies are deliberately not fetched or sent to Google.
+    """
+    name = str(source["name"])
+    source_url = str(source.get("source_url", source["url"]))
+    minimum_page = int(source.get("minimum_page", 104))
+    maximum_page = int(source.get("maximum_page", 199))
+    article_url_template = str(
+        source.get("article_url_template", "https://nos.nl/teletekst/{page}")
+    )
+    if not 100 <= minimum_page <= maximum_page <= 899:
+        raise ValueError("ongeldig Teletekst-paginabereik")
+
+    headlines: dict[int, str] = {}
+    for raw in raw_pages:
+        parser = TeletekstIndexParser(minimum_page, maximum_page)
+        parser.feed(raw.decode("iso-8859-1", errors="replace"))
+        headlines.update(parser.headlines())
+
+    articles: list[Article] = []
+    excluded_items = 0
+    for page, title in sorted(headlines.items()):
+        link = canonicalize_url(article_url_template.format(page=page))
+        if not link:
+            continue
+        if is_excluded_article(title, link, (), rules):
+            excluded_items += 1
+            continue
+        fingerprint = f"{name}|{page}|{normalized_text(title)}"
+        articles.append(
+            Article(
+                article_id=hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:20],
+                title=title,
+                link=link,
+                summary="",
+                source=name,
+                source_url=source_url,
+                published=now,
+                fetched_at=now,
+            )
+        )
+    return articles, len(headlines), excluded_items
+
+
 def fetch_source(
     session: requests.Session,
     source: dict[str, Any],
@@ -500,6 +603,7 @@ def fetch_source(
     started = time.monotonic()
     name = str(source["name"])
     url = str(source["url"])
+    status_url = str(source.get("source_url", url))
     try:
         response = session.get(url, timeout=(8, 25), stream=True)
         response.raise_for_status()
@@ -508,6 +612,49 @@ def fetch_source(
             raise ValueError(f"feed is groter dan {MAX_FEED_BYTES} bytes")
 
         source_type = str(source.get("type", "rss"))
+        if source_type == "teletekst_index":
+            content_type = response.headers.get("Content-Type", "").casefold()
+            if content_type and "html" not in content_type:
+                raise ValueError("Teletekst-index leverde geen HTML")
+            raw_pages = [raw]
+            seen_urls = {canonicalize_url(url)}
+            for index_url_value in source.get("index_urls", []):
+                index_url = canonicalize_url(str(index_url_value))
+                if not index_url or index_url in seen_urls:
+                    continue
+                seen_urls.add(index_url)
+                index_response = session.get(index_url, timeout=(8, 25), stream=True)
+                try:
+                    index_response.raise_for_status()
+                    index_content_type = index_response.headers.get(
+                        "Content-Type", ""
+                    ).casefold()
+                    if index_content_type and "html" not in index_content_type:
+                        raise ValueError("Teletekst-index leverde geen HTML")
+                    index_raw = index_response.raw.read(
+                        MAX_FEED_BYTES + 1, decode_content=True
+                    )
+                    if len(index_raw) > MAX_FEED_BYTES:
+                        raise ValueError(
+                            f"Teletekst-index is groter dan {MAX_FEED_BYTES} bytes"
+                        )
+                    raw_pages.append(index_raw)
+                finally:
+                    index_response.close()
+            articles, fetched_items, excluded_items = parse_teletekst_index_articles(
+                raw_pages, source, now, rules
+            )
+            if fetched_items == 0:
+                raise ValueError("Teletekst-index bevat geen herkenbare nieuwsberichten")
+            return articles, SourceStatus(
+                name=name,
+                url=status_url,
+                ok=True,
+                fetched_items=fetched_items,
+                accepted_items=len(articles),
+                excluded_items=excluded_items,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
         if source_type == "beehiiv_archive":
             content_type = response.headers.get("Content-Type", "").casefold()
             if content_type and "html" not in content_type:
@@ -519,7 +666,7 @@ def fetch_source(
                 raise ValueError("archief bevat geen herkenbare openbare berichten")
             return articles, SourceStatus(
                 name=name,
-                url=url,
+                url=status_url,
                 ok=True,
                 fetched_items=fetched_items,
                 accepted_items=len(articles),
@@ -567,7 +714,7 @@ def fetch_source(
             )
         status = SourceStatus(
             name=name,
-            url=url,
+            url=status_url,
             ok=True,
             fetched_items=len(parsed.entries),
             accepted_items=len(articles),
@@ -579,7 +726,7 @@ def fetch_source(
         logging.warning("Bron %s mislukt: %s", name, exc)
         status = SourceStatus(
             name=name,
-            url=url,
+            url=status_url,
             ok=False,
             fetched_items=0,
             accepted_items=0,
@@ -794,10 +941,24 @@ def enrich_missing_summaries(
         str(source["name"]): tuple(str(value) for value in source.get("article_domains", []))
         for source in sources
     }
+    metadata_enabled = {
+        str(source["name"]): bool(source.get("metadata_enrichment", True))
+        for source in sources
+    }
     cache = load_metadata_cache(cache_path)
     current_ids = {article.article_id for article in articles}
     cache = {article_id: value for article_id, value in cache.items() if article_id in current_ids}
-    eligible = [article for article in articles if len(article.summary.strip()) < minimum_chars]
+    disabled = sum(
+        len(article.summary.strip()) < minimum_chars
+        and not metadata_enabled.get(article.source, True)
+        for article in articles
+    )
+    eligible = [
+        article
+        for article in articles
+        if len(article.summary.strip()) < minimum_chars
+        and metadata_enabled.get(article.source, True)
+    ]
     session = create_session()
     attempted = 0
     enriched = 0
@@ -858,6 +1019,7 @@ def enrich_missing_summaries(
     return {
         "state": "ok" if failed == 0 else "partial",
         "eligible": len(eligible),
+        "disabled_by_source": disabled,
         "attempted": attempted,
         "enriched": enriched,
         "cached": cached,

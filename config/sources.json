@@ -74,6 +74,24 @@
       "enabled": true
     },
     {
+      "name": "NOS Teletekst",
+      "url": "https://teletekst-data.nos.nl/webtekst?p=101",
+      "source_url": "https://nos.nl/teletekst/101",
+      "type": "teletekst_index",
+      "index_urls": [
+        "https://teletekst-data.nos.nl/webtekst?p=101",
+        "https://teletekst-data.nos.nl/webtekst?p=102",
+        "https://teletekst-data.nos.nl/webtekst?p=103"
+      ],
+      "article_url_template": "https://nos.nl/teletekst/{page}",
+      "minimum_page": 104,
+      "maximum_page": 199,
+      "metadata_enrichment": false,
+      "article_domains": ["nos.nl"],
+      "language": "nl",
+      "enabled": true
+    },
+    {
       "name": "de Volkskrant",
       "url": "https://www.volkskrant.nl/voorpagina/rss.xml",
       "article_domains": ["volkskrant.nl"],
